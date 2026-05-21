@@ -1,0 +1,21 @@
+[package]
+name = "triage"
+version = "0.1.0"
+edition = "2024"
+description = "Ergonomic recoverable error handling with retry strategies for Rust"
+keywords = ["retry", "error-handling", "resilience", "backoff", "async"]
+categories = ["asynchronous", "network-programming"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourusername/triage"
+
+[features]
+default = ["tokio"]
+tokio = ["dep:tokio"]
+
+[dependencies]
+rand = "0.10.1"
+tokio = { version = "1.49.0", features = ["time"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.49.0", features = ["macros", "rt"] }
+anyhow = { version = "1.0.101" }
