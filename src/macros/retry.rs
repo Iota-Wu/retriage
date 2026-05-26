@@ -1,13 +1,22 @@
-/// Executes an async closure with retry logic defined by a [`RetryConfig`].
+/// Executes a block with retry logic defined by a [`RetryConfig`].
 ///
-/// This is a thin wrapper around [`crate::runner::run`] that `.await`s
-/// the result for you, keeping call sites clean.
+/// Expands to an `async` block that loops until the inner block succeeds,
+/// all attempts are exhausted, or the error handler returns
+/// [`ErrorDecision::Propagate`].
+///
+/// The block is re-evaluated on every attempt, so any setup inside it
+/// runs each time. This is intentional — it allows borrows and temporaries
+/// (e.g. `sqlx` query builders, `&str` parameters) to be created fresh
+/// each attempt without hitting higher-ranked lifetime errors.
 ///
 /// # Syntax
 ///
 /// ```rust,ignore
-/// retry!(closure, config)
+/// retry!({ expr }, config)
 /// ```
+///
+/// The result is an `async` block — use it directly in an `async` context
+/// or `.await` it at the call site.
 ///
 /// # Example
 ///
@@ -22,25 +31,48 @@
 ///     .handler(MyPolicy)
 ///     .build();
 ///
-/// let result = retry!(|| async {
-///     reqwest::get("https://example.com").await?;
-///     Ok(())
+/// // Simple async expression
+/// let result = retry!({
+///     reqwest::get("https://example.com").await
 /// }, config).await;
+///
+/// // Works with sqlx — no clone needed
+/// let row = retry!({
+///     sqlx::query_as::<_, MyRow>("SELECT * FROM t WHERE id = $1")
+///         .bind(id)
+///         .fetch_one(&pool)
+///         .await
+/// }, config).await?;
 /// ```
 ///
 /// # With rate limiting (out of scope for triage)
 ///
 /// ```rust,ignore
-/// let limiter = Arc::new(RateLimiter::direct(Quota::per_second(10)));
-///
-/// let result = retry!(|| async {
+/// let result = retry!({
 ///     limiter.until_ready().await;
 ///     do_work().await
 /// }, config).await;
 /// ```
 #[macro_export]
 macro_rules! retry {
-    ($f:expr, $config:expr) => {
-        $crate::runner::run(&$config, $f)
+    ($blk:block, $config:expr) => {
+        async {
+            let config = &$config;
+
+            let mut state = config.create_state();
+
+            loop {
+                match $blk {
+                    Ok(value) => break Ok(value),
+                    Err(e) => {
+                        if let Err(final_err) =
+                            $crate::runner::next_step(&mut state, config, e).await
+                        {
+                            break Err(final_err);
+                        }
+                    }
+                }
+            }
+        }
     };
 }

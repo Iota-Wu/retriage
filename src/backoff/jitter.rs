@@ -12,6 +12,7 @@ pub trait Jitter: Send + Sync {
 // ── Built-in implementations ──────────────────────────────────────────────────
 
 /// No jitter — returns the base delay unchanged.
+#[derive(Clone, Copy)]
 pub struct NoJitter;
 
 impl Jitter for NoJitter {
@@ -24,6 +25,7 @@ impl Jitter for NoJitter {
 ///
 /// Recommended for most distributed systems workloads as it
 /// spreads retry storms most effectively.
+#[derive(Clone, Copy)]
 pub struct FullJitter;
 
 impl Jitter for FullJitter {
@@ -39,6 +41,7 @@ impl Jitter for FullJitter {
 ///
 /// Keeps the delay close to the base while still adding enough randomness
 /// to avoid thundering herd. `factor` is clamped to [0.0, 1.0].
+#[derive(Clone, Copy)]
 pub struct BoundedJitter {
     factor: f64,
 }

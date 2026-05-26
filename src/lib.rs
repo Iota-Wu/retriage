@@ -18,7 +18,7 @@
 //!
 //! retry!(
 //!     || async {
-//!         limiter.until_ready().await;  // 流量管理在這裡，triage 不管
+//!         limiter.until_ready().await;  // Triage `do not` manage the rate limit
 //!         reqwest::get(&url).await
 //!     },
 //!     policy
@@ -85,3 +85,19 @@ pub mod macros;
 
 pub use config::RetryConfigBuilder;
 pub use handler::{ErrorDecision, ErrorHandler};
+
+pub mod types {
+    use crate::{
+        backoff::{Exponential, Fixed, Linear, NoJitter},
+        config::RetryConfig,
+    };
+
+    /// A retry configuration using the default Exponential Backoff strategy.
+    pub type ExponentialConfig<H> = RetryConfig<H, Exponential<NoJitter>>;
+
+    /// A retry configuration using a Fixed Interval backoff strategy.
+    pub type FixedConfig<H> = RetryConfig<H, Fixed<NoJitter>>;
+
+    /// A retry configuration using a Linear backoff strategy.
+    pub type LinearConfig<H> = RetryConfig<H, Linear<NoJitter>>;
+}

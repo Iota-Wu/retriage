@@ -62,14 +62,28 @@ macro_rules! dispatch {
         $fallback
     };
 
-    // Recursive case: one typed arm + remaining arms
+    // Recursive case: match closure syntax |var| body directly
+    // This lets us bind `var` as &$type without going through closure type inference
     (
         $err:expr,
-        $type:ty => $handler:expr,
+        $type:ty => |$var:ident| $body:expr,
         $($rest:tt)*
     ) => {
-        if let Some(e) = $err.downcast_ref::<$type>() {
-            ($handler)(e)
+        if let Some($var) = $err.downcast_ref::<$type>() {
+            $body
+        } else {
+            $crate::dispatch!($err, $($rest)*)
+        }
+    };
+
+    // Recursive case: block body variant |var| { ... }
+    (
+        $err:expr,
+        $type:ty => |$var:ident| $body:block,
+        $($rest:tt)*
+    ) => {
+        if let Some($var) = $err.downcast_ref::<$type>() {
+            $body
         } else {
             $crate::dispatch!($err, $($rest)*)
         }

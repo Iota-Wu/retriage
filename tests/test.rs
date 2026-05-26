@@ -7,9 +7,13 @@ use std::{
     },
     time::Duration,
 };
-use triage::backoff::{Exponential, Fixed, FullJitter, Linear};
-use triage::handler::{ErrorDecision, ErrorHandler};
-use triage::{RetryConfigBuilder, dispatch, retry};
+use triage::{
+    RetryConfigBuilder,
+    backoff::{Exponential, Fixed, FullJitter, Linear},
+    dispatch,
+    handler::{ErrorDecision, ErrorHandler},
+    retry,
+};
 
 // ── Shared test error types ───────────────────────────────────────────────────
 
@@ -42,7 +46,7 @@ struct ApiPolicy;
 impl ErrorHandler for ApiPolicy {
     type Err = ApiError;
 
-    fn handle(&self, e: &Self::Err, _attempt: u32) -> ErrorDecision<Self::Err> {
+    fn handle(&self, e: Self::Err, _attempt: u32, _backoff: Duration) -> ErrorDecision<Self::Err> {
         match e {
             ApiError::Timeout => ErrorDecision::Retry,
             ApiError::RateLimited => ErrorDecision::RetryAfter(Duration::from_millis(10)),
@@ -58,7 +62,7 @@ struct AttemptAwarePolicy;
 impl ErrorHandler for AttemptAwarePolicy {
     type Err = ApiError;
 
-    fn handle(&self, e: &Self::Err, attempt: u32) -> ErrorDecision<Self::Err> {
+    fn handle(&self, e: Self::Err, attempt: u32, _backoff: Duration) -> ErrorDecision<Self::Err> {
         match (e, attempt) {
             (ApiError::Timeout, 1..=2) => ErrorDecision::Retry,
             (ApiError::Timeout, _) => ErrorDecision::Propagate(ApiError::Timeout),
@@ -73,7 +77,7 @@ impl ErrorHandler for AttemptAwarePolicy {
 async fn succeeds_without_any_retry() {
     let config = RetryConfigBuilder::new().handler(ApiPolicy).build();
 
-    let result = retry!(|| async { Ok::<&str, ApiError>("hello") }, config).await;
+    let result = retry!({ Ok::<&str, ApiError>("hello") }, config).await;
     assert_eq!(result.unwrap(), "hello");
 }
 
@@ -86,17 +90,13 @@ async fn retries_until_success() {
         .build();
 
     let attempts = Arc::new(AtomicU32::new(0));
-
     let result = retry!(
-        || {
-            let attempts = attempts.clone();
-            async move {
-                let n = attempts.fetch_add(1, Ordering::SeqCst);
-                if n < 3 {
-                    Err(ApiError::Timeout)
-                } else {
-                    Ok("recovered")
-                }
+        {
+            let n = attempts.fetch_add(1, Ordering::SeqCst);
+            if n < 3 {
+                Err(ApiError::Timeout)
+            } else {
+                Ok("recovered")
             }
         },
         config
@@ -116,21 +116,16 @@ async fn propagates_permanent_error_immediately() {
         .build();
 
     let attempts = Arc::new(AtomicU32::new(0));
-
     let result = retry!(
-        || {
-            let attempts = attempts.clone();
-            async move {
-                attempts.fetch_add(1, Ordering::SeqCst);
-                Err::<(), _>(ApiError::NotFound)
-            }
+        {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>(ApiError::NotFound)
         },
         config
     )
     .await;
 
     assert_eq!(result.unwrap_err(), ApiError::NotFound);
-    // NotFound は即 Propagate なので 1 回だけ
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
 }
 
@@ -143,14 +138,10 @@ async fn exhausts_all_attempts() {
         .build();
 
     let attempts = Arc::new(AtomicU32::new(0));
-
     let result = retry!(
-        || {
-            let attempts = attempts.clone();
-            async move {
-                attempts.fetch_add(1, Ordering::SeqCst);
-                Err::<(), _>(ApiError::Timeout)
-            }
+        {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>(ApiError::Timeout)
         },
         config
     )
@@ -171,17 +162,13 @@ async fn works_with_exponential_backoff() {
         .build();
 
     let attempts = Arc::new(AtomicU32::new(0));
-
     let result = retry!(
-        || {
-            let attempts = attempts.clone();
-            async move {
-                let n = attempts.fetch_add(1, Ordering::SeqCst);
-                if n < 2 {
-                    Err(ApiError::Timeout)
-                } else {
-                    Ok(())
-                }
+        {
+            let n = attempts.fetch_add(1, Ordering::SeqCst);
+            if n < 2 {
+                Err(ApiError::Timeout)
+            } else {
+                Ok(())
             }
         },
         config
@@ -199,7 +186,7 @@ async fn works_with_linear_backoff_and_jitter() {
         .handler(ApiPolicy)
         .build();
 
-    let result = retry!(|| async { Ok::<_, ApiError>(42) }, config).await;
+    let result = retry!({ Ok::<_, ApiError>(42) }, config).await;
     assert_eq!(result.unwrap(), 42);
 }
 
@@ -214,18 +201,13 @@ async fn retry_after_overrides_backoff_for_that_attempt() {
         .build();
 
     let attempts = Arc::new(AtomicU32::new(0));
-
-    // RateLimited triggers RetryAfter(10ms) — should still recover
     let result = retry!(
-        || {
-            let attempts = attempts.clone();
-            async move {
-                let n = attempts.fetch_add(1, Ordering::SeqCst);
-                if n < 1 {
-                    Err(ApiError::RateLimited)
-                } else {
-                    Ok("ok")
-                }
+        {
+            let n = attempts.fetch_add(1, Ordering::SeqCst);
+            if n < 1 {
+                Err(ApiError::RateLimited)
+            } else {
+                Ok("ok")
             }
         },
         config
@@ -235,7 +217,7 @@ async fn retry_after_overrides_backoff_for_that_attempt() {
     assert_eq!(result.unwrap(), "ok");
 }
 
-// ── RetryWith ────────────────────────────────────────────────────────────────
+// ── RetryWith ─────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn retry_with_executes_action_then_retries() {
@@ -246,7 +228,12 @@ async fn retry_with_executes_action_then_retries() {
     impl ErrorHandler for RotationPolicy {
         type Err = ApiError;
 
-        fn handle(&self, _e: &Self::Err, _attempt: u32) -> ErrorDecision<Self::Err> {
+        fn handle(
+            &self,
+            _e: Self::Err,
+            _attempt: u32,
+            _backoff: Duration,
+        ) -> ErrorDecision<Self::Err> {
             let rotated = self.rotated.clone();
             ErrorDecision::RetryWith(Box::new(move || {
                 Box::pin(async move {
@@ -267,12 +254,9 @@ async fn retry_with_executes_action_then_retries() {
 
     let attempts = Arc::new(AtomicU32::new(0));
     let _ = retry!(
-        || {
-            let attempts = attempts.clone();
-            async move {
-                attempts.fetch_add(1, Ordering::SeqCst);
-                Err::<(), _>(ApiError::Timeout)
-            }
+        {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>(ApiError::Timeout)
         },
         config
     )
@@ -308,7 +292,12 @@ async fn dispatch_downcasts_anyhow_to_concrete_type() {
     impl ErrorHandler for DispatchPolicy {
         type Err = anyhow::Error;
 
-        fn handle(&self, e: &Self::Err, _attempt: u32) -> ErrorDecision<Self::Err> {
+        fn handle(
+            &self,
+            e: Self::Err,
+            _attempt: u32,
+            _backoff: Duration,
+        ) -> ErrorDecision<Self::Err> {
             dispatch! {
                 e,
                 DbError  => |_e| ErrorDecision::Retry,
@@ -325,17 +314,13 @@ async fn dispatch_downcasts_anyhow_to_concrete_type() {
         .build();
 
     let attempts = Arc::new(AtomicU32::new(0));
-
     let result = retry!(
-        || {
-            let attempts = attempts.clone();
-            async move {
-                let n = attempts.fetch_add(1, Ordering::SeqCst);
-                if n < 2 {
-                    Err(anyhow::Error::new(DbError))
-                } else {
-                    Ok("dispatched")
-                }
+        {
+            let n = attempts.fetch_add(1, Ordering::SeqCst);
+            if n < 2 {
+                Err(anyhow::Error::new(DbError))
+            } else {
+                Ok("dispatched")
             }
         },
         config
@@ -370,7 +355,12 @@ async fn dispatch_falls_through_to_catchall() {
     impl ErrorHandler for StrictPolicy {
         type Err = anyhow::Error;
 
-        fn handle(&self, e: &Self::Err, _attempt: u32) -> ErrorDecision<Self::Err> {
+        fn handle(
+            &self,
+            e: Self::Err,
+            _attempt: u32,
+            _backoff: Duration,
+        ) -> ErrorDecision<Self::Err> {
             dispatch! {
                 e,
                 KnownError => |_e| ErrorDecision::Retry,
@@ -385,12 +375,7 @@ async fn dispatch_falls_through_to_catchall() {
         .handler(StrictPolicy)
         .build();
 
-    // UnknownError 不在 dispatch 的 arm 裡，應該走 catch-all Propagate
-    let result = retry!(
-        || async { Err::<(), _>(anyhow::Error::new(UnknownError)) },
-        config
-    )
-    .await;
+    let result = retry!({ Err::<(), _>(anyhow::Error::new(UnknownError)) }, config).await;
 
     assert!(result.is_err());
 }
@@ -406,14 +391,10 @@ async fn attempt_aware_policy_gives_up_after_threshold() {
         .build();
 
     let attempts = Arc::new(AtomicU32::new(0));
-
     let result = retry!(
-        || {
-            let attempts = attempts.clone();
-            async move {
-                attempts.fetch_add(1, Ordering::SeqCst);
-                Err::<(), _>(ApiError::Timeout)
-            }
+        {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>(ApiError::Timeout)
         },
         config
     )
