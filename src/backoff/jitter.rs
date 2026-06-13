@@ -49,6 +49,7 @@ pub struct BoundedJitter {
 impl BoundedJitter {
     /// `factor` controls the spread around the base delay.
     /// e.g. factor = 0.2 means ±20% of base.
+    #[must_use]
     pub fn new(factor: f64) -> Self {
         Self {
             factor: factor.clamp(0.0, 1.0),
@@ -85,7 +86,7 @@ mod tests {
         let base = Duration::from_millis(500);
         for _ in 0..1000 {
             let result = FullJitter.apply(base);
-            assert!(result <= base, "full jitter exceeded base: {:?}", result);
+            assert!(result <= base, "full jitter exceeded base: {result:?}");
         }
     }
 
@@ -99,8 +100,7 @@ mod tests {
             let result = jitter.apply(base);
             assert!(
                 result >= low && result <= high,
-                "bounded jitter out of range: {:?}",
-                result
+                "bounded jitter out of range: {result:?}"
             );
         }
     }

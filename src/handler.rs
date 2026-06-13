@@ -1,4 +1,9 @@
-use std::{future::Future, pin::Pin, time::Duration};
+use std::{
+    fmt::{Debug, Formatter, Result},
+    future::Future,
+    pin::Pin,
+    time::Duration,
+};
 
 /// A boxed async action to execute before the next retry attempt.
 ///
@@ -21,6 +26,20 @@ pub enum ErrorDecision<E> {
 
     /// Do not retry — propagate the error to the caller as-is.
     Propagate(E),
+}
+
+impl<E> Debug for ErrorDecision<E> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        match self {
+            Self::Retry => f.write_str("Retry"),
+            Self::RetryAfter(duration) => f.debug_tuple("RetryAfter").field(duration).finish(),
+            Self::RetryWith(_) => f.write_str("RetryWith(<async closure>)"),
+            Self::Propagate(_) => f
+                .debug_tuple("Propagate")
+                .field(&"<omitted/opaque error>")
+                .finish(),
+        }
+    }
 }
 
 /// Decides how an error should be handled for a given attempt.
@@ -85,7 +104,7 @@ pub trait ErrorHandler: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fmt;
+    use std::{assert_matches, fmt};
 
     // Minimal error type for testing
     #[derive(Debug, PartialEq)]
@@ -131,28 +150,28 @@ mod tests {
             policy.handle(TestError::Transient, 1, Duration::ZERO),
             ErrorDecision::Retry
         ));
-        assert!(matches!(
+        assert_matches!(
             policy.handle(TestError::Transient, 2, Duration::ZERO),
             ErrorDecision::Retry
-        ));
+        );
     }
 
     #[test]
     fn transient_retry_after_on_late_attempts() {
         let policy = TestPolicy;
-        assert!(matches!(
+        assert_matches!(
             policy.handle(TestError::Transient, 3, Duration::ZERO),
             ErrorDecision::RetryAfter(_)
-        ));
+        );
     }
 
     #[test]
     fn fatal_always_propagates() {
         let policy = TestPolicy;
-        assert!(matches!(
+        assert_matches!(
             policy.handle(TestError::Fatal, 1, Duration::ZERO),
             ErrorDecision::Propagate(TestError::Fatal)
-        ));
+        );
     }
 
     #[test]
@@ -160,6 +179,6 @@ mod tests {
         // Verify RetryWith can hold an async action
         let decision: ErrorDecision<TestError> =
             ErrorDecision::RetryWith(Box::new(|| Box::pin(async { /* rotate IP */ })));
-        assert!(matches!(decision, ErrorDecision::RetryWith(_)));
+        assert_matches!(decision, ErrorDecision::RetryWith(_));
     }
 }

@@ -13,7 +13,7 @@ pub struct RetryState<I> {
     pub(crate) iter: I,
     pub(crate) attempt: u32,
 }
- 
+
 impl<I> RetryState<I>
 where
     I: Iterator<Item = Duration>,
@@ -21,7 +21,7 @@ where
     pub(crate) fn new(iter: I) -> Self {
         Self { iter, attempt: 0 }
     }
- 
+
     #[cfg(test)]
     pub(crate) fn next_delay_for_test(&mut self) -> Option<Duration>
     where
@@ -30,7 +30,7 @@ where
         self.iter.next()
     }
 }
- 
+
 /// Processes a single failed attempt and drives the retry decision.
 ///
 /// Called by the [`retry!`] macro after each failure. Advances the backoff
@@ -58,7 +58,7 @@ where
         None => Err(err),
         Some(backoff) => {
             state.attempt += 1;
- 
+
             match config.handler.handle(err, state.attempt, backoff) {
                 ErrorDecision::Retry => {
                     sleep(backoff).await;
@@ -78,11 +78,13 @@ where
         }
     }
 }
- 
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
- 
+
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+    
     use super::*;
     use crate::{
         backoff::Fixed,
@@ -100,7 +102,7 @@ mod tests {
         Transient,
         Fatal,
     }
- 
+
     impl fmt::Display for TestError {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
@@ -109,9 +111,9 @@ mod tests {
             }
         }
     }
- 
+
     impl std::error::Error for TestError {}
- 
+
     struct TransientPolicy;
     impl ErrorHandler for TransientPolicy {
         type Err = TestError;
@@ -127,7 +129,7 @@ mod tests {
             }
         }
     }
- 
+
     fn make_config() -> RetryConfig<Fixed, TransientPolicy> {
         RetryConfigBuilder::new()
             .attempts(3)
@@ -135,7 +137,7 @@ mod tests {
             .handler(TransientPolicy)
             .build()
     }
- 
+
     #[tokio::test]
     async fn transient_returns_ok_to_signal_retry() {
         let config = make_config();
@@ -143,7 +145,7 @@ mod tests {
         let result = next_step(&mut state, &config, TestError::Transient).await;
         assert!(result.is_ok());
     }
- 
+
     #[tokio::test]
     async fn fatal_returns_err_immediately() {
         let config = make_config();
@@ -151,7 +153,7 @@ mod tests {
         let result = next_step(&mut state, &config, TestError::Fatal).await;
         assert_eq!(result.unwrap_err(), TestError::Fatal);
     }
- 
+
     #[tokio::test]
     async fn exhausted_iterator_propagates_error() {
         let config = make_config();
@@ -164,7 +166,7 @@ mod tests {
         let result = next_step(&mut state, &config, TestError::Transient).await;
         assert!(result.is_err());
     }
- 
+
     #[tokio::test]
     async fn retry_with_executes_action() {
         struct ActionPolicy {
@@ -178,7 +180,7 @@ mod tests {
                 _attempt: u32,
                 _backoff: Duration,
             ) -> ErrorDecision<Self::Err> {
-                let ran = self.ran.clone();
+                let ran = Arc::clone(&self.ran);
                 ErrorDecision::RetryWith(Box::new(move || {
                     Box::pin(async move {
                         ran.fetch_add(1, Ordering::SeqCst);
@@ -186,14 +188,14 @@ mod tests {
                 }))
             }
         }
- 
+
         let ran = Arc::new(AtomicU32::new(0));
         let config = RetryConfigBuilder::new()
             .attempts(3)
             .backoff(Fixed::new(Duration::ZERO))
-            .handler(ActionPolicy { ran: ran.clone() })
+            .handler(ActionPolicy { ran: Arc::clone(&ran) })
             .build();
- 
+
         let mut state = config.create_state();
         let _ = next_step(&mut state, &config, TestError::Transient).await;
         assert_eq!(ran.load(Ordering::SeqCst), 1);

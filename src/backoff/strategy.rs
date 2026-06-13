@@ -29,6 +29,7 @@ pub struct Fixed<J: Jitter = NoJitter> {
 }
 
 impl Fixed {
+    #[must_use]
     pub fn new(delay: Duration) -> Self {
         Self {
             delay,
@@ -38,6 +39,7 @@ impl Fixed {
 }
 
 impl<J: Jitter> Fixed<J> {
+    #[must_use]
     pub fn with_jitter(delay: Duration, jitter: J) -> Self {
         Self { delay, jitter }
     }
@@ -89,6 +91,7 @@ pub struct Linear<J: Jitter = NoJitter> {
 }
 
 impl Linear {
+    #[must_use]
     pub fn new(base: Duration) -> Self {
         Self {
             base,
@@ -100,6 +103,7 @@ impl Linear {
 }
 
 impl<J: Jitter> Linear<J> {
+    #[must_use]
     pub fn with_jitter(base: Duration, jitter: J) -> Self {
         Self {
             base,
@@ -113,6 +117,7 @@ impl<J: Jitter> Linear<J> {
     ///
     /// Without a cap, the delay grows without bound. Most production
     /// configurations should set a cap.
+    #[must_use]
     pub fn max_delay(mut self, max: Duration) -> Self {
         self.max = Some(max);
         self
@@ -180,6 +185,7 @@ pub struct Exponential<J: Jitter = NoJitter> {
 }
 
 impl Exponential {
+    #[must_use]
     pub fn new(base: Duration) -> Self {
         Self {
             base,
@@ -205,6 +211,7 @@ impl<J: Jitter> Exponential<J> {
     ///
     /// Values between `1.0` and `2.0` give gentler growth.
     /// Values below `1.0` will cause the delay to shrink — not recommended.
+    #[must_use]
     pub fn multiplier(mut self, multiplier: f64) -> Self {
         self.multiplier = multiplier;
         self
@@ -214,17 +221,22 @@ impl<J: Jitter> Exponential<J> {
     ///
     /// Without a cap, exponential growth will eventually produce very large
     /// delays. Most production configurations should set a cap.
+    #[must_use]
     pub fn max_delay(mut self, max: Duration) -> Self {
         self.max = Some(max);
         self
     }
 }
 
+// Need to refactor, there is a vulnerability about integer overflow, integer should be boud to avoid oveerflow.
+// In addition, if this function return `None`, there is no way to know what happened.
+// Users just notice that the delay is capped, but do not know why, encounter `Unknown Unknown`.
 impl<J: Jitter> Iterator for Exponential<J> {
     type Item = Duration;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let factor = self.multiplier.powi(self.attempt as i32 - 1);
+        let exponent = i32::try_from(self.attempt - 1).expect("Attempt should not bigger than i32::MAX");
+        let factor = self.multiplier.powi(exponent);
         let delay = Duration::from_secs_f64(self.base.as_secs_f64() * factor);
         let capped = match self.max {
             Some(max) => delay.min(max),
@@ -241,6 +253,7 @@ impl<J: Jitter> Iterator for Exponential<J> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     // Fixed

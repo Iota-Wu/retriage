@@ -42,7 +42,7 @@ where
     pub(crate) strategy: I,
     pub(crate) handler: H,
 }
- 
+
 impl<I, H> RetryConfig<I, H>
 where
     I: Iterator<Item = Duration> + Clone,
@@ -56,7 +56,7 @@ where
         RetryState::new(self.strategy.clone().take((self.max_attempts - 1) as usize))
     }
 }
- 
+
 // ── Builder states ────────────────────────────────────────────────────────────
 //
 // Typestate pattern: the compiler enforces that `.handler()` is called before
@@ -64,7 +64,7 @@ where
 //
 // () = handler not yet provided
 // H  = handler provided
- 
+
 /// Builds a [`RetryConfig`] with a fluent API.
 ///
 /// The only required call is `.handler()` — everything else has a default.
@@ -97,8 +97,9 @@ pub struct RetryConfigBuilder<S, H> {
     strategy: S,
     handler: H,
 }
- 
+
 impl RetryConfigBuilder<Exponential<NoJitter>, ()> {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             max_attempts: 3,
@@ -113,7 +114,7 @@ impl Default for RetryConfigBuilder<Exponential<NoJitter>, ()> {
         Self::new()
     }
 }
- 
+
 impl<I, H> RetryConfigBuilder<I, H>
 where
     I: Iterator<Item = Duration> + Clone,
@@ -124,11 +125,13 @@ where
     /// 1 initial try + 2 retries. Must be at least 1.
     ///
     /// Defaults to `3`.
+    #[must_use]
     pub fn attempts(mut self, max_attempts: u32) -> Self {
+        assert!(self.max_attempts > 0, "max_attempts must be at least 1");
         self.max_attempts = max_attempts;
         self
     }
- 
+
     /// Replace the backoff strategy.
     ///
     /// Accepts any [`Iterator<Item = Duration>`] — this includes all built-in
@@ -150,7 +153,7 @@ where
             handler: self.handler,
         }
     }
- 
+
     /// Attach the error handler.
     ///
     /// Required — `.build()` is only available after this call.
@@ -162,7 +165,7 @@ where
         }
     }
 }
- 
+
 /// Only available once a handler has been provided.
 impl<I, H> RetryConfigBuilder<I, H>
 where
@@ -170,7 +173,6 @@ where
     H: ErrorHandler,
 {
     pub fn build(self) -> RetryConfig<I, H> {
-        assert!(self.max_attempts > 0, "max_attempts must be at least 1");
         RetryConfig {
             max_attempts: self.max_attempts,
             strategy: self.strategy,
@@ -190,7 +192,7 @@ mod tests {
     };
     use crate::handler::{ErrorDecision, ErrorHandler};
     use std::fmt;
- 
+
     #[derive(Debug)]
     struct DummyError;
     impl fmt::Display for DummyError {
@@ -199,7 +201,7 @@ mod tests {
         }
     }
     impl std::error::Error for DummyError {}
- 
+
     struct DummyHandler;
     impl ErrorHandler for DummyHandler {
         type Err = DummyError;
@@ -212,13 +214,13 @@ mod tests {
             ErrorDecision::Propagate(DummyError)
         }
     }
- 
+
     #[test]
     fn builder_defaults() {
         let config = RetryConfigBuilder::new().handler(DummyHandler).build();
         assert_eq!(config.max_attempts, 3);
     }
- 
+
     #[test]
     fn builder_custom_attempts() {
         let config = RetryConfigBuilder::new()
@@ -227,7 +229,7 @@ mod tests {
             .build();
         assert_eq!(config.max_attempts, 10);
     }
- 
+
     #[test]
     fn builder_custom_backoff() {
         let config = RetryConfigBuilder::new()
@@ -236,7 +238,7 @@ mod tests {
             .build();
         assert_eq!(config.max_attempts, 3);
     }
- 
+
     #[test]
     fn builder_full_chain() {
         let config = RetryConfigBuilder::new()
@@ -249,7 +251,7 @@ mod tests {
             .build();
         assert_eq!(config.max_attempts, 5);
     }
- 
+
     #[test]
     #[should_panic(expected = "max_attempts must be at least 1")]
     fn builder_rejects_zero_attempts() {
@@ -258,7 +260,7 @@ mod tests {
             .handler(DummyHandler)
             .build();
     }
- 
+
     #[test]
     fn create_state_is_independent() {
         // The two create_state calls should each start from the beginning, and not be affected by each other.
@@ -267,10 +269,10 @@ mod tests {
             .backoff(Fixed::new(Duration::from_millis(100)))
             .handler(DummyHandler)
             .build();
- 
+
         let mut s1 = config.create_state();
         let mut s2 = config.create_state();
- 
+
         assert_eq!(s1.next_delay_for_test(), s2.next_delay_for_test());
     }
 }

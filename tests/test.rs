@@ -1,4 +1,4 @@
-use anyhow;
+#![allow(clippy::unwrap_used)]
 use std::{
     fmt,
     sync::{
@@ -48,9 +48,8 @@ impl ErrorHandler for ApiPolicy {
 
     fn handle(&self, e: Self::Err, _attempt: u32, _backoff: Duration) -> ErrorDecision<Self::Err> {
         match e {
-            ApiError::Timeout => ErrorDecision::Retry,
+            ApiError::Timeout | ApiError::ServerError => ErrorDecision::Retry,
             ApiError::RateLimited => ErrorDecision::RetryAfter(Duration::from_millis(10)),
-            ApiError::ServerError => ErrorDecision::Retry,
             ApiError::NotFound => ErrorDecision::Propagate(ApiError::NotFound),
         }
     }
@@ -234,7 +233,7 @@ async fn retry_with_executes_action_then_retries() {
             _attempt: u32,
             _backoff: Duration,
         ) -> ErrorDecision<Self::Err> {
-            let rotated = self.rotated.clone();
+            let rotated = Arc::clone(&self.rotated);
             ErrorDecision::RetryWith(Box::new(move || {
                 Box::pin(async move {
                     rotated.fetch_add(1, Ordering::SeqCst);
@@ -248,7 +247,7 @@ async fn retry_with_executes_action_then_retries() {
         .attempts(3)
         .backoff(Fixed::new(Duration::ZERO))
         .handler(RotationPolicy {
-            rotated: rotated.clone(),
+            rotated: Arc::clone(&rotated),
         })
         .build();
 
