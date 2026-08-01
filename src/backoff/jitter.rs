@@ -50,7 +50,7 @@ impl BoundedJitter {
     /// `factor` controls the spread around the base delay.
     /// e.g. factor = 0.2 means ±20% of base.
     #[must_use]
-    pub fn new(factor: f64) -> Self {
+    pub const fn new(factor: f64) -> Self {
         Self {
             factor: factor.clamp(0.0, 1.0),
         }

@@ -12,7 +12,7 @@ use std::{
 pub type RetryAction = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
 
 /// The outcome of [`ErrorHandler::handle`] — decides what happens next.
-pub enum ErrorDecision<E> {
+pub enum ErrorDecision<'a, E: ?Sized + 'static> {
     /// Retry immediately without any delay.
     Retry,
 
@@ -25,19 +25,17 @@ pub enum ErrorDecision<E> {
     RetryWith(RetryAction),
 
     /// Do not retry — propagate the error to the caller as-is.
-    Propagate(E),
+    Propagate(&'a E),
 }
 
-impl<E> Debug for ErrorDecision<E> {
+impl<E: Debug> Debug for ErrorDecision<'_, E> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         match self {
             Self::Retry => f.write_str("Retry"),
             Self::RetryAfter(duration) => f.debug_tuple("RetryAfter").field(duration).finish(),
+            // RetryWith is an async closure, so we can't implement Debug for it directly.
             Self::RetryWith(_) => f.write_str("RetryWith(<async closure>)"),
-            Self::Propagate(_) => f
-                .debug_tuple("Propagate")
-                .field(&"<omitted/opaque error>")
-                .finish(),
+            Self::Propagate(err) => f.debug_tuple("Propagate").field(err).finish(),
         }
     }
 }
@@ -89,14 +87,19 @@ pub trait ErrorHandler: Send + Sync {
     ///
     /// Note: while `Display` is not enforced by the bound, implementors are
     /// strongly encouraged to ensure their error type implements it.
-    type Err: Send + 'static;
+    type Err: Send + ?Sized + 'static;
 
     /// Inspect the error and decide what the runner should do next.
     ///
     /// `attempt` is 1-indexed: the first failure is attempt 1.
     /// `backoff` is the delay the runner has calculated for this attempt —
     /// useful for logging or conditional logic. Ignore with `_` if not needed.
-    fn handle(&self, e: Self::Err, attempt: u32, backoff: Duration) -> ErrorDecision<Self::Err>;
+    fn handle<'a>(
+        &self,
+        e: &'a Self::Err,
+        attempt: u32,
+        backoff: Duration,
+    ) -> ErrorDecision<'a, Self::Err>;
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -129,16 +132,16 @@ mod tests {
     impl ErrorHandler for TestPolicy {
         type Err = TestError;
 
-        fn handle(
+        fn handle<'a>(
             &self,
-            e: Self::Err,
+            e: &'a Self::Err,
             attempt: u32,
             _backoff: Duration,
-        ) -> ErrorDecision<Self::Err> {
+        ) -> ErrorDecision<'a, Self::Err> {
             match e {
                 TestError::Transient if attempt < 3 => ErrorDecision::Retry,
                 TestError::Transient => ErrorDecision::RetryAfter(Duration::from_millis(100)),
-                TestError::Fatal => ErrorDecision::Propagate(TestError::Fatal),
+                TestError::Fatal => ErrorDecision::Propagate(e),
             }
         }
     }
@@ -146,12 +149,12 @@ mod tests {
     #[test]
     fn transient_retries_on_early_attempts() {
         let policy = TestPolicy;
-        assert!(matches!(
-            policy.handle(TestError::Transient, 1, Duration::ZERO),
-            ErrorDecision::Retry
-        ));
         assert_matches!(
-            policy.handle(TestError::Transient, 2, Duration::ZERO),
+            policy.handle(&TestError::Transient, 1, Duration::ZERO),
+            ErrorDecision::Retry
+        );
+        assert_matches!(
+            policy.handle(&TestError::Transient, 2, Duration::ZERO),
             ErrorDecision::Retry
         );
     }
@@ -160,7 +163,7 @@ mod tests {
     fn transient_retry_after_on_late_attempts() {
         let policy = TestPolicy;
         assert_matches!(
-            policy.handle(TestError::Transient, 3, Duration::ZERO),
+            policy.handle(&TestError::Transient, 3, Duration::ZERO),
             ErrorDecision::RetryAfter(_)
         );
     }
@@ -169,7 +172,7 @@ mod tests {
     fn fatal_always_propagates() {
         let policy = TestPolicy;
         assert_matches!(
-            policy.handle(TestError::Fatal, 1, Duration::ZERO),
+            policy.handle(&TestError::Fatal, 1, Duration::ZERO),
             ErrorDecision::Propagate(TestError::Fatal)
         );
     }

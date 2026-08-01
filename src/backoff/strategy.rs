@@ -30,7 +30,7 @@ pub struct Fixed<J: Jitter = NoJitter> {
 
 impl Fixed {
     #[must_use]
-    pub fn new(delay: Duration) -> Self {
+    pub const fn new(delay: Duration) -> Self {
         Self {
             delay,
             jitter: NoJitter,
@@ -40,7 +40,7 @@ impl Fixed {
 
 impl<J: Jitter> Fixed<J> {
     #[must_use]
-    pub fn with_jitter(delay: Duration, jitter: J) -> Self {
+    pub const fn with_jitter(delay: Duration, jitter: J) -> Self {
         Self { delay, jitter }
     }
 }
@@ -66,7 +66,6 @@ impl<J: Jitter> Iterator for Fixed<J> {
 /// | 2       | 400ms                |
 /// | 3       | 600ms                |
 ///
-/// Use [`Linear::max_delay`] to cap the delay before jitter is applied.
 ///
 /// # Example
 ///
@@ -75,27 +74,25 @@ impl<J: Jitter> Iterator for Fixed<J> {
 /// use triage::backoff::BoundedJitter;
 /// use std::time::Duration;
 ///
-/// let backoff = Linear::new(Duration::from_millis(200))
-///     .max_delay(Duration::from_secs(10));
+/// let backoff = Linear::new(Duration::from_millis(200), Duration::from_secs(10));
 ///
 /// // With ±20% jitter
-/// let backoff = Linear::with_jitter(Duration::from_millis(200), BoundedJitter::new(0.2))
-///     .max_delay(Duration::from_secs(10));
+/// let backoff = Linear::with_jitter(Duration::from_millis(200), Duration::from_secs(10), BoundedJitter::new(0.2));
 /// ```
 #[derive(Clone, Copy)]
 pub struct Linear<J: Jitter = NoJitter> {
     base: Duration,
-    max: Option<Duration>,
+    max: Duration,
     jitter: J,
     attempt: u32,
 }
 
 impl Linear {
     #[must_use]
-    pub fn new(base: Duration) -> Self {
+    pub const fn new(base: Duration, max: Duration) -> Self {
         Self {
             base,
-            max: None,
+            max,
             jitter: NoJitter,
             attempt: 1,
         }
@@ -104,23 +101,13 @@ impl Linear {
 
 impl<J: Jitter> Linear<J> {
     #[must_use]
-    pub fn with_jitter(base: Duration, jitter: J) -> Self {
+    pub const fn with_jitter(base: Duration, max: Duration, jitter: J) -> Self {
         Self {
             base,
-            max: None,
+            max,
             jitter,
             attempt: 1,
         }
-    }
-
-    /// Caps the computed delay at `max` before jitter is applied.
-    ///
-    /// Without a cap, the delay grows without bound. Most production
-    /// configurations should set a cap.
-    #[must_use]
-    pub fn max_delay(mut self, max: Duration) -> Self {
-        self.max = Some(max);
-        self
     }
 }
 
@@ -128,11 +115,8 @@ impl<J: Jitter> Iterator for Linear<J> {
     type Item = Duration;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let delay = self.base * self.attempt;
-        let capped = match self.max {
-            Some(max) => delay.min(max),
-            None => delay,
-        };
+        let delay = self.base.saturating_mul(self.attempt);
+        let capped = delay.min(self.max);
 
         self.attempt += 1;
 
@@ -156,7 +140,6 @@ impl<J: Jitter> Iterator for Linear<J> {
 /// | 3       | 400ms                                  |
 /// | 4       | 800ms                                  |
 ///
-/// Use [`Exponential::max_delay`] to prevent unbounded growth.
 /// Use [`Exponential::multiplier`] to tune the growth rate.
 ///
 /// # Example
@@ -167,30 +150,32 @@ impl<J: Jitter> Iterator for Linear<J> {
 /// use std::time::Duration;
 ///
 /// // Classic exponential backoff, capped at 30s
-/// let backoff = Exponential::new(Duration::from_millis(100))
-///     .max_delay(Duration::from_secs(30));
+/// let backoff = Exponential::new(Duration::from_millis(100), Duration::from_secs(30));
 ///
 /// // Gentler growth with full jitter — recommended for distributed systems
-/// let backoff = Exponential::with_jitter(Duration::from_millis(100), FullJitter)
-///     .multiplier(1.5)
-///     .max_delay(Duration::from_secs(30));
+/// let backoff = Exponential::with_jitter(
+///         Duration::from_millis(100),
+///         Duration::from_secs(30),
+///         FullJitter,
+///     )
+///     .multiplier(1.5);
 /// ```
 #[derive(Clone, Copy)]
 pub struct Exponential<J: Jitter = NoJitter> {
     base: Duration,
     multiplier: f64,
-    max: Option<Duration>,
+    max: Duration,
     jitter: J,
     attempt: u32,
 }
 
 impl Exponential {
     #[must_use]
-    pub fn new(base: Duration) -> Self {
+    pub const fn new(base: Duration, max: Duration) -> Self {
         Self {
             base,
             multiplier: 2.0,
-            max: None,
+            max,
             jitter: NoJitter,
             attempt: 1,
         }
@@ -198,11 +183,11 @@ impl Exponential {
 }
 
 impl<J: Jitter> Exponential<J> {
-    pub fn with_jitter(base: Duration, jitter: J) -> Self {
+    pub const fn with_jitter(base: Duration, max: Duration, jitter: J) -> Self {
         Self {
             base,
             multiplier: 2.0,
-            max: None,
+            max,
             jitter,
             attempt: 1,
         }
@@ -212,35 +197,24 @@ impl<J: Jitter> Exponential<J> {
     /// Values between `1.0` and `2.0` give gentler growth.
     /// Values below `1.0` will cause the delay to shrink — not recommended.
     #[must_use]
-    pub fn multiplier(mut self, multiplier: f64) -> Self {
+    pub const fn multiplier(mut self, multiplier: f64) -> Self {
         self.multiplier = multiplier;
-        self
-    }
-
-    /// Caps the computed delay at `max` before jitter is applied.
-    ///
-    /// Without a cap, exponential growth will eventually produce very large
-    /// delays. Most production configurations should set a cap.
-    #[must_use]
-    pub fn max_delay(mut self, max: Duration) -> Self {
-        self.max = Some(max);
         self
     }
 }
 
-// Need to refactor, there is a vulnerability about integer overflow, integer should be boud to avoid oveerflow.
-// In addition, if this function return `None`, there is no way to know what happened.
-// Users just notice that the delay is capped, but do not know why, encounter `Unknown Unknown`.
 impl<J: Jitter> Iterator for Exponential<J> {
     type Item = Duration;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let exponent = i32::try_from(self.attempt - 1).expect("Attempt should not bigger than i32::MAX");
+        let exponent =
+            i32::try_from(self.attempt - 1).expect("Attempt should not bigger than i32::MAX");
         let factor = self.multiplier.powi(exponent);
-        let delay = Duration::from_secs_f64(self.base.as_secs_f64() * factor);
-        let capped = match self.max {
-            Some(max) => delay.min(max),
-            None => delay,
+        let raw = self.base.as_secs_f64() * factor;
+        let capped = if raw.is_finite() {
+            Duration::from_secs_f64(raw).min(self.max)
+        } else {
+            self.max
         };
 
         self.attempt += 1;
@@ -254,6 +228,7 @@ impl<J: Jitter> Iterator for Exponential<J> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+
     use super::*;
 
     // Fixed
@@ -270,7 +245,7 @@ mod tests {
 
     #[test]
     fn linear_scales_with_attempt() {
-        let mut b = Linear::new(Duration::from_millis(100));
+        let mut b = Linear::new(Duration::from_millis(100), Duration::MAX);
         assert_eq!(b.next().unwrap(), Duration::from_millis(100));
         assert_eq!(b.next().unwrap(), Duration::from_millis(200));
         assert_eq!(b.next().unwrap(), Duration::from_millis(300));
@@ -278,7 +253,7 @@ mod tests {
 
     #[test]
     fn linear_respects_max() {
-        let mut b = Linear::new(Duration::from_millis(100)).max_delay(Duration::from_millis(250));
+        let mut b = Linear::new(Duration::from_millis(100), Duration::from_millis(250));
         assert_eq!(b.next().unwrap(), Duration::from_millis(100)); // 100
         assert_eq!(b.next().unwrap(), Duration::from_millis(200)); // 200
         assert_eq!(b.next().unwrap(), Duration::from_millis(250)); // 300 → capped
@@ -289,7 +264,7 @@ mod tests {
 
     #[test]
     fn exponential_doubles_by_default() {
-        let mut b = Exponential::new(Duration::from_millis(100));
+        let mut b = Exponential::new(Duration::from_millis(100), Duration::MAX);
         assert_eq!(b.next().unwrap(), Duration::from_millis(100));
         assert_eq!(b.next().unwrap(), Duration::from_millis(200));
         assert_eq!(b.next().unwrap(), Duration::from_millis(400));
@@ -298,7 +273,7 @@ mod tests {
 
     #[test]
     fn exponential_custom_multiplier() {
-        let mut b = Exponential::new(Duration::from_millis(100)).multiplier(1.5);
+        let mut b = Exponential::new(Duration::from_millis(100), Duration::MAX).multiplier(1.5);
         assert_eq!(b.next().unwrap(), Duration::from_millis(100));
         assert_eq!(b.next().unwrap(), Duration::from_millis(150)); // 100 * 1.5
         assert_eq!(b.next().unwrap(), Duration::from_millis(225)); // 100 * 1.5^2
@@ -306,8 +281,7 @@ mod tests {
 
     #[test]
     fn exponential_respects_max() {
-        let mut b =
-            Exponential::new(Duration::from_millis(100)).max_delay(Duration::from_millis(300));
+        let mut b = Exponential::new(Duration::from_millis(100), Duration::from_millis(300));
         assert_eq!(b.next().unwrap(), Duration::from_millis(100));
         assert_eq!(b.next().unwrap(), Duration::from_millis(200));
         assert_eq!(b.next().unwrap(), Duration::from_millis(300)); // capped
@@ -329,8 +303,11 @@ mod tests {
     #[test]
     fn exponential_with_bounded_jitter() {
         use crate::backoff::jitter::BoundedJitter;
-        let mut b = Exponential::with_jitter(Duration::from_millis(100), BoundedJitter::new(0.2))
-            .max_delay(Duration::from_secs(30));
+        let mut b = Exponential::with_jitter(
+            Duration::from_millis(100),
+            Duration::MAX,
+            BoundedJitter::new(0.2),
+        );
 
         b.next(); // attempt 1 = 100ms, skip
         // attempt 2: 200ms ±20% → [160ms, 240ms]
