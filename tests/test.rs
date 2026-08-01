@@ -1,4 +1,5 @@
 #![allow(clippy::unwrap_used)]
+
 use std::{
     fmt,
     sync::{
@@ -22,7 +23,6 @@ enum ApiError {
     Timeout,
     RateLimited,
     NotFound,
-    ServerError,
 }
 
 impl fmt::Display for ApiError {
@@ -31,7 +31,6 @@ impl fmt::Display for ApiError {
             ApiError::Timeout => write!(f, "request timed out"),
             ApiError::RateLimited => write!(f, "rate limited"),
             ApiError::NotFound => write!(f, "not found"),
-            ApiError::ServerError => write!(f, "internal server error"),
         }
     }
 }
@@ -46,11 +45,16 @@ struct ApiPolicy;
 impl ErrorHandler for ApiPolicy {
     type Err = ApiError;
 
-    fn handle(&self, e: Self::Err, _attempt: u32, _backoff: Duration) -> ErrorDecision<Self::Err> {
+    fn handle<'a>(
+        &self,
+        e: &'a Self::Err,
+        _attempt: u32,
+        _backoff: Duration,
+    ) -> ErrorDecision<'a, Self::Err> {
         match e {
-            ApiError::Timeout | ApiError::ServerError => ErrorDecision::Retry,
+            ApiError::Timeout => ErrorDecision::Retry,
             ApiError::RateLimited => ErrorDecision::RetryAfter(Duration::from_millis(10)),
-            ApiError::NotFound => ErrorDecision::Propagate(ApiError::NotFound),
+            ApiError::NotFound => ErrorDecision::Propagate(e),
         }
     }
 }
@@ -61,11 +65,15 @@ struct AttemptAwarePolicy;
 impl ErrorHandler for AttemptAwarePolicy {
     type Err = ApiError;
 
-    fn handle(&self, e: Self::Err, attempt: u32, _backoff: Duration) -> ErrorDecision<Self::Err> {
+    fn handle<'a>(
+        &self,
+        e: &'a Self::Err,
+        attempt: u32,
+        _backoff: Duration,
+    ) -> ErrorDecision<'a, Self::Err> {
         match (e, attempt) {
             (ApiError::Timeout, 1..=2) => ErrorDecision::Retry,
-            (ApiError::Timeout, _) => ErrorDecision::Propagate(ApiError::Timeout),
-            _ => ErrorDecision::Propagate(ApiError::ServerError),
+            _ => ErrorDecision::Propagate(e),
         }
     }
 }
@@ -76,14 +84,16 @@ impl ErrorHandler for AttemptAwarePolicy {
 async fn succeeds_without_any_retry() {
     let config = RetryConfigBuilder::new().handler(ApiPolicy).build();
 
-    let result = retry!({ Ok::<&str, ApiError>("hello") }, config).await;
-    assert_eq!(result.unwrap(), "hello");
+    let result = retry!({ Ok::<&str, ApiError>("hello") }, config)
+        .await
+        .unwrap();
+    assert_eq!(result, "hello");
 }
 
 #[tokio::test]
 async fn retries_until_success() {
     let config = RetryConfigBuilder::new()
-        .attempts(5)
+        .max_retries(4)
         .backoff(Fixed::new(Duration::ZERO))
         .handler(ApiPolicy)
         .build();
@@ -100,16 +110,17 @@ async fn retries_until_success() {
         },
         config
     )
-    .await;
+    .await
+    .unwrap();
 
-    assert_eq!(result.unwrap(), "recovered");
+    assert_eq!(result, "recovered");
     assert_eq!(attempts.load(Ordering::SeqCst), 4);
 }
 
 #[tokio::test]
 async fn propagates_permanent_error_immediately() {
     let config = RetryConfigBuilder::new()
-        .attempts(5)
+        .max_retries(4)
         .backoff(Fixed::new(Duration::ZERO))
         .handler(ApiPolicy)
         .build();
@@ -122,16 +133,17 @@ async fn propagates_permanent_error_immediately() {
         },
         config
     )
-    .await;
+    .await
+    .unwrap_err();
 
-    assert_eq!(result.unwrap_err(), ApiError::NotFound);
+    assert_eq!(result, ApiError::NotFound);
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
 async fn exhausts_all_attempts() {
     let config = RetryConfigBuilder::new()
-        .attempts(3)
+        .max_retries(2)
         .backoff(Fixed::new(Duration::ZERO))
         .handler(ApiPolicy)
         .build();
@@ -155,8 +167,8 @@ async fn exhausts_all_attempts() {
 #[tokio::test]
 async fn works_with_exponential_backoff() {
     let config = RetryConfigBuilder::new()
-        .attempts(3)
-        .backoff(Exponential::new(Duration::ZERO))
+        .max_retries(2)
+        .backoff(Exponential::new(Duration::ZERO, Duration::MAX))
         .handler(ApiPolicy)
         .build();
 
@@ -180,13 +192,17 @@ async fn works_with_exponential_backoff() {
 #[tokio::test]
 async fn works_with_linear_backoff_and_jitter() {
     let config = RetryConfigBuilder::new()
-        .attempts(3)
-        .backoff(Linear::with_jitter(Duration::ZERO, FullJitter))
+        .max_retries(2)
+        .backoff(Linear::with_jitter(
+            Duration::ZERO,
+            Duration::MAX,
+            FullJitter,
+        ))
         .handler(ApiPolicy)
         .build();
 
-    let result = retry!({ Ok::<_, ApiError>(42) }, config).await;
-    assert_eq!(result.unwrap(), 42);
+    let result = retry!({ Ok::<_, ApiError>(42) }, config).await.unwrap();
+    assert_eq!(result, 42);
 }
 
 // ── RetryAfter ────────────────────────────────────────────────────────────────
@@ -194,7 +210,7 @@ async fn works_with_linear_backoff_and_jitter() {
 #[tokio::test]
 async fn retry_after_overrides_backoff_for_that_attempt() {
     let config = RetryConfigBuilder::new()
-        .attempts(3)
+        .max_retries(2)
         .backoff(Fixed::new(Duration::ZERO))
         .handler(ApiPolicy)
         .build();
@@ -211,9 +227,10 @@ async fn retry_after_overrides_backoff_for_that_attempt() {
         },
         config
     )
-    .await;
+    .await
+    .unwrap();
 
-    assert_eq!(result.unwrap(), "ok");
+    assert_eq!(result, "ok");
 }
 
 // ── RetryWith ─────────────────────────────────────────────────────────────────
@@ -227,12 +244,12 @@ async fn retry_with_executes_action_then_retries() {
     impl ErrorHandler for RotationPolicy {
         type Err = ApiError;
 
-        fn handle(
+        fn handle<'a>(
             &self,
-            _e: Self::Err,
+            _e: &'a Self::Err,
             _attempt: u32,
             _backoff: Duration,
-        ) -> ErrorDecision<Self::Err> {
+        ) -> ErrorDecision<'a, Self::Err> {
             let rotated = Arc::clone(&self.rotated);
             ErrorDecision::RetryWith(Box::new(move || {
                 Box::pin(async move {
@@ -244,7 +261,7 @@ async fn retry_with_executes_action_then_retries() {
 
     let rotated = Arc::new(AtomicU32::new(0));
     let config = RetryConfigBuilder::new()
-        .attempts(3)
+        .max_retries(2)
         .backoff(Fixed::new(Duration::ZERO))
         .handler(RotationPolicy {
             rotated: Arc::clone(&rotated),
@@ -291,23 +308,23 @@ async fn dispatch_downcasts_anyhow_to_concrete_type() {
     impl ErrorHandler for DispatchPolicy {
         type Err = anyhow::Error;
 
-        fn handle(
+        fn handle<'a>(
             &self,
-            e: Self::Err,
+            e: &'a Self::Err,
             _attempt: u32,
             _backoff: Duration,
-        ) -> ErrorDecision<Self::Err> {
+        ) -> ErrorDecision<'a, Self::Err> {
             dispatch! {
                 e,
                 DbError  => |_e| ErrorDecision::Retry,
                 NetError => |_e| ErrorDecision::Retry,
-                _ => ErrorDecision::Propagate(anyhow::anyhow!("unknown error")),
+                _ => ErrorDecision::Propagate(e),
             }
         }
     }
 
     let config = RetryConfigBuilder::new()
-        .attempts(3)
+        .max_retries(2)
         .backoff(Fixed::new(Duration::ZERO))
         .handler(DispatchPolicy)
         .build();
@@ -324,9 +341,10 @@ async fn dispatch_downcasts_anyhow_to_concrete_type() {
         },
         config
     )
-    .await;
+    .await
+    .unwrap();
 
-    assert_eq!(result.unwrap(), "dispatched");
+    assert_eq!(result, "dispatched");
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
 }
 
@@ -354,22 +372,22 @@ async fn dispatch_falls_through_to_catchall() {
     impl ErrorHandler for StrictPolicy {
         type Err = anyhow::Error;
 
-        fn handle(
+        fn handle<'a>(
             &self,
-            e: Self::Err,
+            e: &'a Self::Err,
             _attempt: u32,
             _backoff: Duration,
-        ) -> ErrorDecision<Self::Err> {
+        ) -> ErrorDecision<'a, Self::Err> {
             dispatch! {
                 e,
                 KnownError => |_e| ErrorDecision::Retry,
-                _ => ErrorDecision::Propagate(anyhow::anyhow!("unhandled error")),
+                _ => ErrorDecision::Propagate(e),
             }
         }
     }
 
     let config = RetryConfigBuilder::new()
-        .attempts(3)
+        .max_retries(2)
         .backoff(Fixed::new(Duration::ZERO))
         .handler(StrictPolicy)
         .build();
@@ -384,7 +402,7 @@ async fn dispatch_falls_through_to_catchall() {
 #[tokio::test]
 async fn attempt_aware_policy_gives_up_after_threshold() {
     let config = RetryConfigBuilder::new()
-        .attempts(5)
+        .max_retries(4)
         .backoff(Fixed::new(Duration::ZERO))
         .handler(AttemptAwarePolicy)
         .build();
@@ -397,9 +415,10 @@ async fn attempt_aware_policy_gives_up_after_threshold() {
         },
         config
     )
-    .await;
+    .await
+    .unwrap_err();
 
-    assert_eq!(result.unwrap_err(), ApiError::Timeout);
+    assert_eq!(result, ApiError::Timeout);
     // attempt 1 → Retry, attempt 2 → Retry, attempt 3 → Propagate
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
 }

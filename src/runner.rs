@@ -2,7 +2,7 @@ use crate::{
     config::RetryConfig,
     handler::{ErrorDecision, ErrorHandler},
 };
-use std::time::Duration;
+use std::{ops::ControlFlow, time::Duration};
 use tokio::time::sleep;
 
 /// Tracks iteration state for a single retry sequence.
@@ -34,46 +34,45 @@ where
 /// Processes a single failed attempt and drives the retry decision.
 ///
 /// Called by the [`retry!`] macro after each failure. Advances the backoff
-/// iterator, consults the error handler, then either sleeps and returns `Ok(())`
-/// (signal to retry) or returns `Err(e)` (signal to stop).
+/// iterator, consults the error handler via a shared reference to the error,
+/// then either sleeps and returns [`ControlFlow::Continue`] (signal to retry)
+/// or returns [`ControlFlow::Break`] (signal to stop).
 ///
-/// Returns:
-/// - `Ok(())` — caller should retry
-/// - `Err(e)` — caller should propagate; either attempts exhausted or handler
-///   returned [`ErrorDecision::Propagate`]
+/// The original error remains owned by the caller (`retry!` macro) throughout,
+/// so it can be propagated without any cloning or re-allocation on the stop path.
 ///
 /// This function is `pub` for advanced use cases. Most users should use
 /// the [`retry!`] macro instead.
 pub async fn next_step<I, H>(
     state: &mut RetryState<I>,
     config: &RetryConfig<impl Iterator<Item = Duration> + Clone, H>,
-    err: H::Err,
-) -> Result<(), H::Err>
+    err: &H::Err,
+) -> ControlFlow<()>
 where
     I: Iterator<Item = Duration>,
     H: ErrorHandler,
 {
     match state.iter.next() {
-        // Iterator exhausted — all attempts used up
-        None => Err(err),
+        // Iterator exhausted — all retries used up
+        None => ControlFlow::Break(()),
         Some(backoff) => {
             state.attempt += 1;
 
             match config.handler.handle(err, state.attempt, backoff) {
                 ErrorDecision::Retry => {
                     sleep(backoff).await;
-                    Ok(())
+                    ControlFlow::Continue(())
                 }
                 ErrorDecision::RetryAfter(duration) => {
                     sleep(duration).await;
-                    Ok(())
+                    ControlFlow::Continue(())
                 }
                 ErrorDecision::RetryWith(action) => {
                     action().await;
                     sleep(backoff).await;
-                    Ok(())
+                    ControlFlow::Continue(())
                 }
-                ErrorDecision::Propagate(err) => Err(err),
+                ErrorDecision::Propagate(_) => ControlFlow::Break(()),
             }
         }
     }
@@ -84,7 +83,7 @@ where
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    
+
     use super::*;
     use crate::{
         backoff::Fixed,
@@ -93,8 +92,10 @@ mod tests {
     };
     use std::{
         fmt,
-        sync::Arc,
-        sync::atomic::{AtomicU32, Ordering},
+        sync::{
+            Arc,
+            atomic::{AtomicU32, Ordering},
+        },
     };
 
     #[derive(Debug, PartialEq)]
@@ -117,54 +118,54 @@ mod tests {
     struct TransientPolicy;
     impl ErrorHandler for TransientPolicy {
         type Err = TestError;
-        fn handle(
+        fn handle<'a>(
             &self,
-            e: Self::Err,
+            e: &'a Self::Err,
             _attempt: u32,
             _backoff: Duration,
-        ) -> ErrorDecision<Self::Err> {
+        ) -> ErrorDecision<'a, Self::Err> {
             match e {
                 TestError::Transient => ErrorDecision::Retry,
-                TestError::Fatal => ErrorDecision::Propagate(TestError::Fatal),
+                TestError::Fatal => ErrorDecision::Propagate(e),
             }
         }
     }
 
     fn make_config() -> RetryConfig<Fixed, TransientPolicy> {
         RetryConfigBuilder::new()
-            .attempts(3)
+            .max_retries(2)
             .backoff(Fixed::new(Duration::ZERO))
             .handler(TransientPolicy)
             .build()
     }
 
     #[tokio::test]
-    async fn transient_returns_ok_to_signal_retry() {
+    async fn transient_returns_continue() {
         let config = make_config();
         let mut state = config.create_state();
-        let result = next_step(&mut state, &config, TestError::Transient).await;
-        assert!(result.is_ok());
+        let result = next_step(&mut state, &config, &TestError::Transient).await;
+        assert!(result.is_continue());
     }
 
     #[tokio::test]
-    async fn fatal_returns_err_immediately() {
+    async fn fatal_returns_break() {
         let config = make_config();
         let mut state = config.create_state();
-        let result = next_step(&mut state, &config, TestError::Fatal).await;
-        assert_eq!(result.unwrap_err(), TestError::Fatal);
+        let result = next_step(&mut state, &config, &TestError::Fatal).await;
+        assert!(result.is_break());
     }
 
     #[tokio::test]
-    async fn exhausted_iterator_propagates_error() {
+    async fn exhausted_iterator_returns_break() {
         let config = make_config();
         let mut state = config.create_state();
-        // attempts(3) = 2 retries = 2 backoff values
+        // max_retries(2) = 2 retries = 2 backoff values
         for _ in 0..2 {
-            let _ = next_step(&mut state, &config, TestError::Transient).await;
+            let _ = next_step(&mut state, &config, &TestError::Transient).await;
         }
         // 3rd call — iterator exhausted
-        let result = next_step(&mut state, &config, TestError::Transient).await;
-        assert!(result.is_err());
+        let result = next_step(&mut state, &config, &TestError::Transient).await;
+        assert!(result.is_break());
     }
 
     #[tokio::test]
@@ -174,12 +175,12 @@ mod tests {
         }
         impl ErrorHandler for ActionPolicy {
             type Err = TestError;
-            fn handle(
+            fn handle<'a>(
                 &self,
-                _e: Self::Err,
+                _e: &'a Self::Err,
                 _attempt: u32,
                 _backoff: Duration,
-            ) -> ErrorDecision<Self::Err> {
+            ) -> ErrorDecision<'a, Self::Err> {
                 let ran = Arc::clone(&self.ran);
                 ErrorDecision::RetryWith(Box::new(move || {
                     Box::pin(async move {
@@ -191,13 +192,15 @@ mod tests {
 
         let ran = Arc::new(AtomicU32::new(0));
         let config = RetryConfigBuilder::new()
-            .attempts(3)
+            .max_retries(2)
             .backoff(Fixed::new(Duration::ZERO))
-            .handler(ActionPolicy { ran: Arc::clone(&ran) })
+            .handler(ActionPolicy {
+                ran: Arc::clone(&ran),
+            })
             .build();
 
         let mut state = config.create_state();
-        let _ = next_step(&mut state, &config, TestError::Transient).await;
+        let _ = next_step(&mut state, &config, &TestError::Transient).await;
         assert_eq!(ran.load(Ordering::SeqCst), 1);
     }
 }

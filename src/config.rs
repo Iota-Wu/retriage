@@ -38,7 +38,7 @@ where
     I: Iterator<Item = Duration> + Clone,
     H: ErrorHandler,
 {
-    pub(crate) max_attempts: u32,
+    pub(crate) retry_attempts: u32,
     pub(crate) strategy: I,
     pub(crate) handler: H,
 }
@@ -50,10 +50,10 @@ where
 {
     /// Creates a fresh [`RetryState`] for one retry sequence.
     ///
-    /// Clones the strategy iterator and caps it at `max_attempts`, so each
+    /// Clones the strategy iterator and caps it at `retry_attempts`, so each
     /// call to `retry!` gets its own independent state — shared configs are safe.
     pub fn create_state(&self) -> RetryState<std::iter::Take<I>> {
-        RetryState::new(self.strategy.clone().take((self.max_attempts - 1) as usize))
+        RetryState::new(self.strategy.clone().take(self.retry_attempts as usize))
     }
 }
 
@@ -73,7 +73,7 @@ where
 ///
 /// | Setting | Default |
 /// |---|---|
-/// | `attempts` | `3` |
+/// | `max_retries` | `2` |
 /// | `backoff` | [`Exponential`] 100ms base, no jitter |
 ///
 /// # Example
@@ -84,34 +84,33 @@ where
 /// use std::time::Duration;
 ///
 /// let config = RetryConfigBuilder::new()
-///     .attempts(5)
+///     .max_retries(4) // retry 4 times before giving up
 ///     .backoff(
-///         Exponential::with_jitter(Duration::from_millis(100), FullJitter)
-///             .max_delay(Duration::from_secs(30))
+///         Exponential::with_jitter(
+///             Duration::from_millis(100),
+///             Duration::from_secs(30),
+///             FullJitter)
 ///     )
 ///     .handler(MyPolicy)
 ///     .build();
 /// ```
 pub struct RetryConfigBuilder<S, H> {
-    max_attempts: u32,
+    // Number of retries before giving up.
+    // Does not include the initial attempt.
+    retry_attempts: u32,
     strategy: S,
     handler: H,
 }
 
+#[allow(clippy::new_without_default)]
 impl RetryConfigBuilder<Exponential<NoJitter>, ()> {
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
-            max_attempts: 3,
-            strategy: Exponential::new(Duration::from_millis(100)),
+            retry_attempts: 2,
+            strategy: Exponential::new(Duration::from_millis(100), Duration::MAX),
             handler: (),
         }
-    }
-}
-
-impl Default for RetryConfigBuilder<Exponential<NoJitter>, ()> {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -119,16 +118,12 @@ impl<I, H> RetryConfigBuilder<I, H>
 where
     I: Iterator<Item = Duration> + Clone,
 {
-    /// Maximum number of attempts before giving up.
+    /// Maximum number of retries before giving up.
     ///
-    /// Includes the first attempt — e.g. `attempts(3)` means
-    /// 1 initial try + 2 retries. Must be at least 1.
-    ///
-    /// Defaults to `3`.
+    /// Defaults to `2`.
     #[must_use]
-    pub fn attempts(mut self, max_attempts: u32) -> Self {
-        assert!(self.max_attempts > 0, "max_attempts must be at least 1");
-        self.max_attempts = max_attempts;
+    pub const fn max_retries(mut self, attempts: u32) -> Self {
+        self.retry_attempts = attempts;
         self
     }
 
@@ -148,7 +143,7 @@ where
         NS: Iterator<Item = Duration> + Clone,
     {
         RetryConfigBuilder {
-            max_attempts: self.max_attempts,
+            retry_attempts: self.retry_attempts,
             strategy,
             handler: self.handler,
         }
@@ -159,7 +154,7 @@ where
     /// Required — `.build()` is only available after this call.
     pub fn handler<NH: ErrorHandler>(self, handler: NH) -> RetryConfigBuilder<I, NH> {
         RetryConfigBuilder {
-            max_attempts: self.max_attempts,
+            retry_attempts: self.retry_attempts,
             strategy: self.strategy,
             handler,
         }
@@ -174,7 +169,7 @@ where
 {
     pub fn build(self) -> RetryConfig<I, H> {
         RetryConfig {
-            max_attempts: self.max_attempts,
+            retry_attempts: self.retry_attempts,
             strategy: self.strategy,
             handler: self.handler,
         }
@@ -205,29 +200,29 @@ mod tests {
     struct DummyHandler;
     impl ErrorHandler for DummyHandler {
         type Err = DummyError;
-        fn handle(
+        fn handle<'a>(
             &self,
-            _e: Self::Err,
+            _e: &'a Self::Err,
             _attempt: u32,
             _backoff: Duration,
-        ) -> ErrorDecision<Self::Err> {
-            ErrorDecision::Propagate(DummyError)
+        ) -> ErrorDecision<'a, Self::Err> {
+            ErrorDecision::Propagate(&DummyError)
         }
     }
 
     #[test]
     fn builder_defaults() {
         let config = RetryConfigBuilder::new().handler(DummyHandler).build();
-        assert_eq!(config.max_attempts, 3);
+        assert_eq!(config.retry_attempts, 2);
     }
 
     #[test]
     fn builder_custom_attempts() {
         let config = RetryConfigBuilder::new()
-            .attempts(10)
+            .max_retries(9)
             .handler(DummyHandler)
             .build();
-        assert_eq!(config.max_attempts, 10);
+        assert_eq!(config.retry_attempts, 9);
     }
 
     #[test]
@@ -236,36 +231,28 @@ mod tests {
             .backoff(Fixed::new(Duration::from_millis(50)))
             .handler(DummyHandler)
             .build();
-        assert_eq!(config.max_attempts, 3);
+        assert_eq!(config.retry_attempts, 2);
     }
 
     #[test]
     fn builder_full_chain() {
         let config = RetryConfigBuilder::new()
-            .attempts(5)
-            .backoff(
-                Linear::with_jitter(Duration::from_millis(200), FullJitter)
-                    .max_delay(Duration::from_secs(10)),
-            )
+            .max_retries(4)
+            .backoff(Linear::with_jitter(
+                Duration::from_millis(200),
+                Duration::from_secs(10),
+                FullJitter,
+            ))
             .handler(DummyHandler)
             .build();
-        assert_eq!(config.max_attempts, 5);
-    }
-
-    #[test]
-    #[should_panic(expected = "max_attempts must be at least 1")]
-    fn builder_rejects_zero_attempts() {
-        RetryConfigBuilder::new()
-            .attempts(0)
-            .handler(DummyHandler)
-            .build();
+        assert_eq!(config.retry_attempts, 4);
     }
 
     #[test]
     fn create_state_is_independent() {
         // The two create_state calls should each start from the beginning, and not be affected by each other.
         let config = RetryConfigBuilder::new()
-            .attempts(3)
+            .max_retries(4)
             .backoff(Fixed::new(Duration::from_millis(100)))
             .handler(DummyHandler)
             .build();

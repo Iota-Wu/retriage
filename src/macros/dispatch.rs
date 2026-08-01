@@ -5,17 +5,14 @@
 ///
 /// | Error type | Works with `dispatch!` |
 /// |---|---|
-/// | `anyhow::Error` | ✓ — recommended |
+/// | `anyhow::Error` | ✓ |
+/// | `dyn std::error::Error` | ✓ — via `impl dyn Error` in std |
 /// | `thiserror` enum | use `match` directly, no downcast needed |
-/// | `Box<dyn Error>` | ✗ — `dyn Error` has no `downcast_ref`; use `anyhow` instead |
+/// | `Box<dyn Error>` | ✗ — use `anyhow` or `dyn Error` instead |
 ///
-/// `dispatch!` requires `downcast_ref`, which is only available on
-/// [`anyhow::Error`]. This is a limitation of the standard library —
-/// `dyn std::error::Error` does not expose downcasting. If this changes
-/// in a future version of Rust, broader support may become possible.
-///
-/// For `Box<dyn Error>` use cases, wrapping with `anyhow::Error` via
-/// `anyhow::Error::from(e)` is the recommended migration path.
+/// Both `anyhow::Error` and `&dyn std::error::Error` expose `downcast_ref`,
+/// so `dispatch!` works with either. `Box<dyn Error>` is not supported
+/// as it does not implement `std::error::Error` itself.
 ///
 /// # Usage
 ///

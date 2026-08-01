@@ -75,6 +75,17 @@
 //! // elsewhere
 //! let result = retry!(|| async { do_work().await }, *RETRY).await;
 //! ```
+//! //! ## Known limitations
+//!
+//! **Automatic error type coercion** — when a block returns a different error
+//! type than `H::Err`, use the cast parameter to unify them on the stack
+//! without heap allocation:
+//!
+//! ```rust,ignore
+//! retry!({ do_work().await }, config, |e| e as &dyn std::error::Error)
+//! ```
+//!
+//! Full automatic coercion (without the cast parameter) is a planned feature.
 
 pub mod backoff;
 pub mod config;
@@ -85,6 +96,7 @@ pub mod macros;
 
 pub use config::RetryConfigBuilder;
 pub use handler::{ErrorDecision, ErrorHandler};
+pub use types::*;
 
 pub mod types {
     use crate::{
@@ -93,11 +105,14 @@ pub mod types {
     };
 
     /// A retry configuration using the default Exponential Backoff strategy.
-    pub type ExponentialConfig<H> = RetryConfig<H, Exponential<NoJitter>>;
+    pub type ExponentialConfig<H, J = NoJitter> = RetryConfig<Exponential<J>, H>;
 
     /// A retry configuration using a Fixed Interval backoff strategy.
-    pub type FixedConfig<H> = RetryConfig<H, Fixed<NoJitter>>;
+    pub type FixedConfig<H, J = NoJitter> = RetryConfig<Fixed<J>, H>;
 
     /// A retry configuration using a Linear backoff strategy.
-    pub type LinearConfig<H> = RetryConfig<H, Linear<NoJitter>>;
+    pub type LinearConfig<H, J = NoJitter> = RetryConfig<Linear<J>, H>;
+
+    /// Convenience alias for the full dynamic error bound.
+    pub type DynError = dyn std::error::Error + Send + Sync + 'static;
 }
