@@ -59,10 +59,7 @@ where
             state.attempt += 1;
 
             match config.handler.handle(err, state.attempt, backoff) {
-                ErrorDecision::Retry => {
-                    sleep(backoff).await;
-                    ControlFlow::Continue(())
-                }
+                ErrorDecision::RetryImmediately => ControlFlow::Continue(()),
                 ErrorDecision::RetryAfter(duration) => {
                     sleep(duration).await;
                     ControlFlow::Continue(())
@@ -70,6 +67,10 @@ where
                 ErrorDecision::RetryWith(action) => {
                     action().await;
                     sleep(backoff).await;
+                    ControlFlow::Continue(())
+                }
+                ErrorDecision::RetryWithImmediately(action) => {
+                    action().await;
                     ControlFlow::Continue(())
                 }
                 ErrorDecision::Propagate(_) => ControlFlow::Break(()),
@@ -125,7 +126,7 @@ mod tests {
             _backoff: Duration,
         ) -> ErrorDecision<'a, Self::Err> {
             match e {
-                TestError::Transient => ErrorDecision::Retry,
+                TestError::Transient => ErrorDecision::RetryImmediately,
                 TestError::Fatal => ErrorDecision::Propagate(e),
             }
         }

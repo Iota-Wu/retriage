@@ -3,16 +3,14 @@
 ///
 /// # Type support
 ///
-/// | Error type | Works with `dispatch!` |
-/// |---|---|
-/// | `anyhow::Error` | ✓ |
-/// | `dyn std::error::Error` | ✓ — via `impl dyn Error` in std |
-/// | `thiserror` enum | use `match` directly, no downcast needed |
-/// | `Box<dyn Error>` | ✗ — use `anyhow` or `dyn Error` instead |
-///
-/// Both `anyhow::Error` and `&dyn std::error::Error` expose `downcast_ref`,
-/// so `dispatch!` works with either. `Box<dyn Error>` is not supported
-/// as it does not implement `std::error::Error` itself.
+/// | Error type | Works with `dispatch!` | Note |
+/// |---|---|---|
+/// | `anyhow::Error` | ✓ | Exposes `.downcast_ref()` directly |
+/// | `thiserror` enum | — | Use `match` directly, no downcasting needed |
+/// | `dyn std::error::Error` | ✓ | Supported via `impl dyn Error` in `std` |
+/// | `Box<dyn std::error::Error>` | ✓ | Derefs to `&dyn Error` automatically |
+/// `dispatch!` works with any error representation that exposes or derefs to a `.downcast_ref::<T>()`
+/// method (such as `anyhow::Error`, `&dyn std::error::Error`, or `Box<dyn std::error::Error>`).
 ///
 /// # Usage
 ///
@@ -25,25 +23,33 @@
 /// # Example
 ///
 /// ```rust,ignore
-/// use triage::handler::{ErrorDecision, ErrorHandler};
-/// use triage::dispatch;
+/// use retriage::{handler::{ErrorDecision, ErrorHandler}, dispatch};
 ///
 /// struct MyPolicy;
 ///
 /// impl ErrorHandler for MyPolicy {
 ///     type Err = anyhow::Error;
 ///
-///     fn handle(&self, e: &Self::Err, attempt: u32) -> ErrorDecision<Self::Err> {
+///     fn handle<'a>(
+///         &self,
+///         e: &'a Self::Err,
+///         _attempt: u32,
+///         backoff: std::time::Duration,
+///     ) -> ErrorDecision<'a, Self::Err> {
 ///         dispatch! {
 ///             e,
 ///             reqwest::Error => |e| {
 ///                 if e.is_timeout() {
-///                     ErrorDecision::Retry
+///                     tracing::warn!("timeout error: {e}");
+///                     ErrorDecision::RetryAfter(backoff)
 ///                 } else {
 ///                     ErrorDecision::Propagate(anyhow::anyhow!(e.to_string()))
 ///                 }
 ///             },
-///             sqlx::Error => |e| ErrorDecision::Retry,
+///             sqlx::Error => |e| {
+///                 tracing::warn!("sqlx error: {e}");
+///                 ErrorDecision::RetryImmediately
+///             },
 ///             _ => ErrorDecision::Propagate(anyhow::anyhow!("unknown error")),
 ///         }
 ///     }
@@ -85,4 +91,87 @@ macro_rules! dispatch {
             $crate::dispatch!($err, $($rest)*)
         }
     };
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use std::{error::Error, fmt};
+
+    #[derive(Debug, PartialEq)]
+    struct CustomTimeoutError;
+
+    impl fmt::Display for CustomTimeoutError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "timeout error")
+        }
+    }
+    impl Error for CustomTimeoutError {}
+
+    #[derive(Debug, PartialEq)]
+    struct CustomAuthError;
+
+    impl fmt::Display for CustomAuthError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "auth error")
+        }
+    }
+    impl Error for CustomAuthError {}
+
+    #[test]
+    fn dispatch_with_dyn_error_trait_object() {
+        let err: &dyn Error = &CustomTimeoutError;
+
+        let result = dispatch! {
+            err,
+            CustomTimeoutError => |_e| "retry_timeout",
+            CustomAuthError => |_e| "retry_auth",
+            _ => "propagate",
+        };
+
+        assert_eq!(result, "retry_timeout");
+    }
+
+    #[test]
+    fn dispatch_with_boxed_dyn_error() {
+        use crate::DynError;
+
+        let err: Box<DynError> = Box::new(CustomAuthError);
+
+        let result = dispatch! {
+            err,
+            CustomTimeoutError => |_e| "retry_timeout",
+            CustomAuthError => |_e| "retry_auth",
+            _ => "propagate",
+        };
+
+        assert_eq!(result, "retry_auth");
+    }
+
+    #[test]
+    fn dispatch_fallback_arm() {
+        let err: &dyn Error = &CustomTimeoutError;
+
+        let result = dispatch! {
+            err,
+            CustomAuthError => |_e| "retry_auth",
+            _ => "fallback",
+        };
+
+        assert_eq!(result, "fallback");
+    }
+
+    #[test]
+    fn dispatch_with_anyhow_error() {
+        let err = anyhow::Error::new(CustomTimeoutError);
+
+        let result = dispatch! {
+            err,
+            CustomTimeoutError => |_e| "retry_timeout",
+            _ => "fallback",
+        };
+
+        assert_eq!(result, "retry_timeout");
+    }
 }

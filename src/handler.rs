@@ -14,7 +14,7 @@ pub type RetryAction = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Sen
 /// The outcome of [`ErrorHandler::handle`] — decides what happens next.
 pub enum ErrorDecision<'a, E: ?Sized + 'static> {
     /// Retry immediately without any delay.
-    Retry,
+    RetryImmediately,
 
     /// Wait for the specified duration, then retry.
     /// Overrides the configured backoff for this attempt only.
@@ -24,6 +24,10 @@ pub enum ErrorDecision<'a, E: ?Sized + 'static> {
     /// then retry. Backoff still applies after the action completes.
     RetryWith(RetryAction),
 
+    /// Execute an async action (e.g. rotate IP, refresh token),
+    /// then retry. Backoff does not apply after the action completes.
+    RetryWithImmediately(RetryAction),
+
     /// Do not retry — propagate the error to the caller as-is.
     Propagate(&'a E),
 }
@@ -31,10 +35,12 @@ pub enum ErrorDecision<'a, E: ?Sized + 'static> {
 impl<E: Debug> Debug for ErrorDecision<'_, E> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         match self {
-            Self::Retry => f.write_str("Retry"),
+            Self::RetryImmediately => f.write_str("RetryImmediately"),
             Self::RetryAfter(duration) => f.debug_tuple("RetryAfter").field(duration).finish(),
             // RetryWith is an async closure, so we can't implement Debug for it directly.
             Self::RetryWith(_) => f.write_str("RetryWith(<async closure>)"),
+            // RetryWithImmediately is an async closure, so we can't implement Debug for it directly.
+            Self::RetryWithImmediately(_) => f.write_str("RetryWithImmediately(<async closure>)"),
             Self::Propagate(err) => f.debug_tuple("Propagate").field(err).finish(),
         }
     }
@@ -45,19 +51,25 @@ impl<E: Debug> Debug for ErrorDecision<'_, E> {
 /// # Example
 ///
 /// ```rust,ignore
-/// use triage::handler::{ErrorHandler, ErrorDecision};
+/// use retriage::handler::{ErrorHandler, ErrorDecision};
 ///
 /// struct MyPolicy;
 ///
 /// impl ErrorHandler for MyPolicy {
 ///     type Err = anyhow::Error;
 ///
-///     fn handle(&self, e: &Self::Err, attempt: u32) -> ErrorDecision<Self::Err> {
+///     fn handle<'a>(
+///         &self,
+///         e: &'a Self::Err,
+///         _attempt: u32,
+///         backoff: Duration,
+///     ) -> ErrorDecision<'a, Self::Err> {
 ///         dispatch! {
 ///             e,
 ///             reqwest::Error => |e| {
 ///                 if e.is_timeout() {
-///                     ErrorDecision::Retry
+///                     tracing::warn!("request timed out, retrying in {}ms", backoff.as_millis());
+///                     ErrorDecision::RetryAfter(backoff)
 ///                 } else {
 ///                     ErrorDecision::Propagate(anyhow::anyhow!(e.to_string()))
 ///                 }
@@ -74,16 +86,15 @@ pub trait ErrorHandler: Send + Sync {
     /// |---|---|---|
     /// | `anyhow::Error` | ✓ | ✓ |
     /// | `thiserror` enum | ✓ use `match` directly | — not needed |
-    /// | `Box<dyn Error>` | ✗ | ✗ |
+    /// | `Box<dyn std::error::Error>` | ✓ | ✓ |
+    /// | `dyn std::error::Error` (trait object) | ✓ (due to `?Sized`) | ✓ |
     ///
-    /// # Why not `std::error::Error`?
+    /// # Trait Bounds Design
     ///
     /// `anyhow::Error` intentionally does not implement `std::error::Error`,
-    /// so that bound is deliberately absent here. Only `Send + 'static` is
-    /// required, which is sufficient for safe use across async tasks.
-    ///
-    /// `Box<dyn Error>` is unsupported because it does not satisfy `Sized`.
-    /// This is a standard library limitation — migrate with `anyhow::Error::from(e)`.
+    /// so that bound is deliberately absent from `type Err`. Only `Send + ?Sized + 'static`
+    /// is required, allowing both custom error types, `anyhow::Error`, and unsized
+    /// trait objects (`dyn std::error::Error`) to be handled transparently.
     ///
     /// Note: while `Display` is not enforced by the bound, implementors are
     /// strongly encouraged to ensure their error type implements it.
@@ -136,35 +147,44 @@ mod tests {
             &self,
             e: &'a Self::Err,
             attempt: u32,
-            _backoff: Duration,
+            backoff: Duration,
         ) -> ErrorDecision<'a, Self::Err> {
             match e {
-                TestError::Transient if attempt < 3 => ErrorDecision::Retry,
-                TestError::Transient => ErrorDecision::RetryAfter(Duration::from_millis(100)),
+                TestError::Transient if attempt == 1 => ErrorDecision::RetryImmediately,
+                TestError::Transient if attempt == 2 => ErrorDecision::RetryAfter(backoff),
+                TestError::Transient => ErrorDecision::RetryWithImmediately(Box::new(|| {
+                    Box::pin(async { /* refresh token or rotate IP */ })
+                })),
                 TestError::Fatal => ErrorDecision::Propagate(e),
             }
         }
     }
 
     #[test]
-    fn transient_retries_on_early_attempts() {
+    fn test_retry_immediately_on_first_attempt() {
         let policy = TestPolicy;
         assert_matches!(
-            policy.handle(&TestError::Transient, 1, Duration::ZERO),
-            ErrorDecision::Retry
-        );
-        assert_matches!(
-            policy.handle(&TestError::Transient, 2, Duration::ZERO),
-            ErrorDecision::Retry
+            policy.handle(&TestError::Transient, 1, Duration::from_millis(100)),
+            ErrorDecision::RetryImmediately
         );
     }
 
     #[test]
-    fn transient_retry_after_on_late_attempts() {
+    fn test_retry_after_on_second_attempt() {
+        let policy = TestPolicy;
+        let delay = Duration::from_millis(100);
+        assert_matches!(
+            policy.handle(&TestError::Transient, 2, delay),
+            ErrorDecision::RetryAfter(d) if d == delay
+        );
+    }
+
+    #[test]
+    fn test_retry_with_immediately_on_later_attempts() {
         let policy = TestPolicy;
         assert_matches!(
-            policy.handle(&TestError::Transient, 3, Duration::ZERO),
-            ErrorDecision::RetryAfter(_)
+            policy.handle(&TestError::Transient, 3, Duration::from_millis(100)),
+            ErrorDecision::RetryWithImmediately(_)
         );
     }
 
@@ -178,10 +198,41 @@ mod tests {
     }
 
     #[test]
-    fn retry_with_carries_action() {
-        // Verify RetryWith can hold an async action
+    fn test_retry_with_carries_action() {
         let decision: ErrorDecision<TestError> =
             ErrorDecision::RetryWith(Box::new(|| Box::pin(async { /* rotate IP */ })));
         assert_matches!(decision, ErrorDecision::RetryWith(_));
+    }
+
+    #[test]
+    fn test_retry_with_immediately_carries_action() {
+        let decision: ErrorDecision<TestError> =
+            ErrorDecision::RetryWithImmediately(Box::new(|| Box::pin(async { /* rotate IP */ })));
+        assert_matches!(decision, ErrorDecision::RetryWithImmediately(_));
+    }
+
+    #[test]
+    fn test_debug_formatting() {
+        let decision_immediately: ErrorDecision<TestError> = ErrorDecision::RetryImmediately;
+        assert_eq!(format!("{decision_immediately:?}"), "RetryImmediately");
+
+        let decision_after: ErrorDecision<TestError> =
+            ErrorDecision::RetryAfter(Duration::from_millis(50));
+        assert_eq!(format!("{decision_after:?}"), "RetryAfter(50ms)");
+
+        let decision_with: ErrorDecision<TestError> =
+            ErrorDecision::RetryWith(Box::new(|| Box::pin(async {})));
+        assert_eq!(format!("{decision_with:?}"), "RetryWith(<async closure>)");
+
+        let decision_with_imm: ErrorDecision<TestError> =
+            ErrorDecision::RetryWithImmediately(Box::new(|| Box::pin(async {})));
+        assert_eq!(
+            format!("{decision_with_imm:?}"),
+            "RetryWithImmediately(<async closure>)"
+        );
+
+        let err = TestError::Fatal;
+        let decision_propagate: ErrorDecision<TestError> = ErrorDecision::Propagate(&err);
+        assert_eq!(format!("{decision_propagate:?}"), "Propagate(Fatal)");
     }
 }

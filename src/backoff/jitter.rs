@@ -113,4 +113,13 @@ mod tests {
         let result = jitter.apply(base);
         assert!(result <= Duration::from_millis(400));
     }
+
+    #[test]
+    fn bounded_jitter_clamps_negative_factor() {
+        // factor < 0.0 should be clamped to 0.0 (equivalent to NoJitter)
+        let base = Duration::from_millis(200);
+        let jitter = BoundedJitter::new(-1.0);
+        let result = jitter.apply(base);
+        assert_eq!(result, base);
+    }
 }
