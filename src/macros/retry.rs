@@ -15,8 +15,8 @@ pub fn cast_err<'a, E, Target: ?Sized>(e: &'a E, f: impl Fn(&'a E) -> &'a Target
 /// Executes a block with retry logic defined by a [`RetryConfig`].
 ///
 /// Expands to an `async` block — `.await` it at the call site. This makes
-/// the async nature explicit, since the retry loop uses `tokio::time::sleep`
-/// internally.
+/// the async nature explicit, as delay management (via `tokio::time::sleep`)
+/// is handled asynchronously by the runner based on [`ErrorDecision`].
 ///
 /// The block is re-evaluated on every attempt, which avoids higher-ranked
 /// lifetime errors that arise when async closures capture borrows
@@ -26,42 +26,42 @@ pub fn cast_err<'a, E, Target: ?Sized>(e: &'a E, f: impl Fn(&'a E) -> &'a Target
 ///
 /// ```rust,ignore
 /// // Without cast — E must match H::Err exactly
-/// retry!({ expr }, config).await
+/// let value = retry!({ expr }, config).await?;
 ///
 /// // With cast — convert &E to &H::Err on the error path, zero heap allocation
-/// retry!({ expr }, config, |e| e as &DynError).await
-/// retry!({ expr }, config, |e: &anyhow::Error| e.as_ref()).await
+/// let value = retry!({ expr }, config, |e| e as &DynError).await?;
+/// let value = retry!({ expr }, config, |e| e.as_ref()).await?;
 /// ```
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use triage::{retry, RetryConfigBuilder};
-/// use triage::backoff::Exponential;
+/// use retriage::{retry, RetryConfigBuilder};
+/// use retriage::backoff::Exponential;
 /// use std::time::Duration;
 ///
 /// // Simple case — error type matches handler directly
-/// let result = retry!({
-///     reqwest::get("https://example.com").await
-/// }, config).await;
+/// let foo = retry!({
+///     bar().await
+/// }, config).await?;
 ///
 /// // Multiple error sources — cast to unify, zero heap allocation
-/// let result = retry!({
-///     sqlx::query(...).await
-/// }, config, |e| e as &triage::DynError).await;
+/// let foo = retry!({
+///     bar().await
+/// }, config, |e| e as &retriage::DynError).await?;
 ///
 /// // anyhow::Error — use as_ref() to get &dyn Error
-/// let result = retry!({
-///     do_work().await
-/// }, config, |e: &anyhow::Error| e.as_ref()).await;
+/// let foo = retry!({
+///     bar().await
+/// }, config, |e: &anyhow::Error| e.as_ref()).await?;
 /// ```
 ///
-/// # With rate limiting (out of scope for triage)
+/// # With rate limiting (out of scope for retriage)
 ///
 /// ```rust,ignore
 /// retry!({
 ///     limiter.until_ready().await;
-///     do_work().await
+///     foo().await
 /// }, config).await;
 /// ```
 #[macro_export]
@@ -110,4 +110,150 @@ macro_rules! retry {
             }
         }
     };
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        backoff::Fixed,
+        config::RetryConfigBuilder,
+        handler::{ErrorDecision, ErrorHandler},
+        types::DynError,
+    };
+    use std::{
+        error::Error as StdError,
+        fmt::Display,
+        sync::atomic::{AtomicU32, Ordering},
+        time::Duration,
+    };
+
+    #[derive(Debug, PartialEq)]
+    struct CustomError;
+
+    impl Display for CustomError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "CustomError")
+        }
+    }
+
+    impl StdError for CustomError {}
+
+    struct TestPolicy;
+
+    impl ErrorHandler for TestPolicy {
+        type Err = CustomError;
+
+        fn handle<'a>(
+            &self,
+            e: &'a Self::Err,
+            attempt: u32,
+            _backoff: Duration,
+        ) -> ErrorDecision<'a, Self::Err> {
+            if attempt < 3 {
+                ErrorDecision::RetryImmediately
+            } else {
+                ErrorDecision::Propagate(e)
+            }
+        }
+    }
+
+    struct DynPolicy;
+
+    impl ErrorHandler for DynPolicy {
+        type Err = DynError;
+
+        fn handle<'a>(
+            &self,
+            e: &'a Self::Err,
+            attempt: u32,
+            _backoff: Duration,
+        ) -> ErrorDecision<'a, Self::Err> {
+            if attempt < 2 {
+                ErrorDecision::RetryImmediately
+            } else {
+                ErrorDecision::Propagate(e)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_macro_without_cast_success() {
+        let config = RetryConfigBuilder::new()
+            .max_retries(3)
+            .backoff(Fixed::new(Duration::ZERO))
+            .handler(TestPolicy)
+            .build();
+
+        let attempts = AtomicU32::new(0);
+
+        let result: Result<&str, CustomError> = retry!(
+            {
+                let count = attempts.fetch_add(1, Ordering::SeqCst);
+                if count < 2 {
+                    Err(CustomError)
+                } else {
+                    Ok("success")
+                }
+            },
+            config
+        )
+        .await;
+
+        assert_eq!(result, Ok("success"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn retry_macro_with_cast_success() {
+        let config = RetryConfigBuilder::new()
+            .max_retries(3)
+            .backoff(Fixed::new(Duration::ZERO))
+            .handler(DynPolicy)
+            .build();
+
+        let attempts = AtomicU32::new(0);
+
+        let result: Result<&str, CustomError> = retry!(
+            {
+                let count = attempts.fetch_add(1, Ordering::SeqCst);
+                if count < 1 {
+                    Err(CustomError)
+                } else {
+                    Ok("success")
+                }
+            },
+            config,
+            |e| e as &DynError
+        )
+        .await;
+
+        assert_eq!(result, Ok("success"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_macro_propagates_error_on_exhaustion() {
+        let config = RetryConfigBuilder::new()
+            .max_retries(1)
+            .backoff(Fixed::new(Duration::ZERO))
+            .handler(TestPolicy)
+            .build();
+
+        let attempts = AtomicU32::new(0);
+
+        let result: Result<&str, CustomError> = retry!(
+            {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err(CustomError)
+            },
+            config
+        )
+        .await;
+
+        assert_eq!(result, Err(CustomError));
+        // Initial attempt (1) + max 1 retry = 2 attempts total
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
 }

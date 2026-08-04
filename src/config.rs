@@ -20,17 +20,24 @@ use std::time::Duration;
 ///
 /// ```rust,ignore
 /// use std::sync::LazyLock;
-/// use triage::{RetryConfigBuilder, backoff::Exponential};
+/// use retriage::{RetryConfigBuilder, backoff::Exponential};
 /// use std::time::Duration;
 ///
 /// // Note: `static` requires fully explicit type parameters — `_` is not allowed.
-/// static RETRY: LazyLock<RetryConfig<Exponential, MyPolicy>> = LazyLock::new(|| {
-///     RetryConfigBuilder::new()
-///         .attempts(5)
-///         .backoff(Exponential::new(Duration::from_millis(100)))
-///         .handler(MyPolicy)
-///         .build()
-/// });
+/// static RETRY_CONFIG: LazyLock<ExponentialConfig<MyPolicy, FullJitter>> =
+///     LazyLock::new(|| {
+///         let backoff = Exponential::with_jitter(
+///             Duration::from_millis(100),
+///             Duration::from_millis(1650),
+///             FullJitter,
+///         );
+///
+///         RetryConfigBuilder::new()
+///             .max_retries(4)
+///             .backoff(backoff)
+///             .handler(MyPolicy)
+///             .build()
+///     });
 /// ```
 #[derive(Clone, Copy)]
 pub struct RetryConfig<I, H>
@@ -74,25 +81,25 @@ where
 /// | Setting | Default |
 /// |---|---|
 /// | `max_retries` | `2` |
-/// | `backoff` | [`Exponential`] 100ms base, no jitter |
+/// | `backoff` | [`Exponential`] 100ms base, Duration::MAX max limit, and no jitter |
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use triage::RetryConfigBuilder;
-/// use triage::backoff::{Exponential, FullJitter};
-/// use std::time::Duration;
-///
-/// let config = RetryConfigBuilder::new()
-///     .max_retries(4) // retry 4 times before giving up
-///     .backoff(
-///         Exponential::with_jitter(
+/// static RETRY_CONFIG: LazyLock<ExponentialConfig<MyPolicy, FullJitter>> =
+///     LazyLock::new(|| {
+///         let backoff = Exponential::with_jitter(
 ///             Duration::from_millis(100),
-///             Duration::from_secs(30),
-///             FullJitter)
-///     )
-///     .handler(MyPolicy)
-///     .build();
+///             Duration::from_millis(1650),
+///             FullJitter,
+///         );
+///
+///         RetryConfigBuilder::new()
+///             .max_retries(4)
+///             .backoff(backoff)
+///             .handler(MyPolicy)
+///             .build()
+///     });
 /// ```
 pub struct RetryConfigBuilder<S, H> {
     // Number of retries before giving up.

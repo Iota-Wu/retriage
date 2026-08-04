@@ -1,5 +1,13 @@
 #![allow(clippy::unwrap_used)]
 
+use retriage::{
+    RetryConfigBuilder,
+    backoff::{Exponential, Fixed, FullJitter, Linear},
+    dispatch,
+    handler::{ErrorDecision, ErrorHandler},
+    retry,
+    types::DynError,
+};
 use std::{
     fmt,
     sync::{
@@ -7,13 +15,6 @@ use std::{
         atomic::{AtomicU32, Ordering},
     },
     time::Duration,
-};
-use triage::{
-    RetryConfigBuilder,
-    backoff::{Exponential, Fixed, FullJitter, Linear},
-    dispatch,
-    handler::{ErrorDecision, ErrorHandler},
-    retry,
 };
 
 // ── Shared test error types ───────────────────────────────────────────────────
@@ -52,7 +53,7 @@ impl ErrorHandler for ApiPolicy {
         _backoff: Duration,
     ) -> ErrorDecision<'a, Self::Err> {
         match e {
-            ApiError::Timeout => ErrorDecision::Retry,
+            ApiError::Timeout => ErrorDecision::RetryImmediately,
             ApiError::RateLimited => ErrorDecision::RetryAfter(Duration::from_millis(10)),
             ApiError::NotFound => ErrorDecision::Propagate(e),
         }
@@ -72,7 +73,7 @@ impl ErrorHandler for AttemptAwarePolicy {
         _backoff: Duration,
     ) -> ErrorDecision<'a, Self::Err> {
         match (e, attempt) {
-            (ApiError::Timeout, 1..=2) => ErrorDecision::Retry,
+            (ApiError::Timeout, 1..=2) => ErrorDecision::RetryImmediately,
             _ => ErrorDecision::Propagate(e),
         }
     }
@@ -233,7 +234,7 @@ async fn retry_after_overrides_backoff_for_that_attempt() {
     assert_eq!(result, "ok");
 }
 
-// ── RetryWith ─────────────────────────────────────────────────────────────────
+// ── RetryWith & RetryWithImmediately ──────────────────────────────────────────
 
 #[tokio::test]
 async fn retry_with_executes_action_then_retries() {
@@ -282,6 +283,97 @@ async fn retry_with_executes_action_then_retries() {
     assert_eq!(rotated.load(Ordering::SeqCst), 2);
 }
 
+#[tokio::test]
+async fn retry_with_immediately_executes_action_then_retries_immediately() {
+    struct ImmediateRotationPolicy {
+        rotated: Arc<AtomicU32>,
+    }
+
+    impl ErrorHandler for ImmediateRotationPolicy {
+        type Err = ApiError;
+
+        fn handle<'a>(
+            &self,
+            _e: &'a Self::Err,
+            _attempt: u32,
+            _backoff: Duration,
+        ) -> ErrorDecision<'a, Self::Err> {
+            let rotated = Arc::clone(&self.rotated);
+            ErrorDecision::RetryWithImmediately(Box::new(move || {
+                Box::pin(async move {
+                    rotated.fetch_add(1, Ordering::SeqCst);
+                })
+            }))
+        }
+    }
+
+    let rotated = Arc::new(AtomicU32::new(0));
+    let config = RetryConfigBuilder::new()
+        .max_retries(2)
+        .backoff(Fixed::new(Duration::from_secs(60)))
+        .handler(ImmediateRotationPolicy {
+            rotated: Arc::clone(&rotated),
+        })
+        .build();
+
+    let attempts = Arc::new(AtomicU32::new(0));
+    let _ = retry!(
+        {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>(ApiError::Timeout)
+        },
+        config
+    )
+    .await;
+
+    assert_eq!(rotated.load(Ordering::SeqCst), 2);
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+}
+
+// ── Macro cast parameter ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn retry_with_cast_parameter() {
+    struct DynPolicy;
+    impl ErrorHandler for DynPolicy {
+        type Err = DynError;
+
+        fn handle<'a>(
+            &self,
+            _e: &'a Self::Err,
+            _attempt: u32,
+            _backoff: Duration,
+        ) -> ErrorDecision<'a, Self::Err> {
+            ErrorDecision::RetryImmediately
+        }
+    }
+
+    let config = RetryConfigBuilder::new()
+        .max_retries(2)
+        .backoff(Fixed::new(Duration::ZERO))
+        .handler(DynPolicy)
+        .build();
+
+    let attempts = Arc::new(AtomicU32::new(0));
+    let result = retry!(
+        {
+            let n = attempts.fetch_add(1, Ordering::SeqCst);
+            if n < 2 {
+                Err(ApiError::Timeout)
+            } else {
+                Ok("cast_success")
+            }
+        },
+        config,
+        |e| e as &DynError
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result, "cast_success");
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+}
+
 // ── dispatch! macro ───────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -316,8 +408,8 @@ async fn dispatch_downcasts_anyhow_to_concrete_type() {
         ) -> ErrorDecision<'a, Self::Err> {
             dispatch! {
                 e,
-                DbError  => |_e| ErrorDecision::Retry,
-                NetError => |_e| ErrorDecision::Retry,
+                DbError  => |_e| ErrorDecision::RetryImmediately,
+                NetError => |_e| ErrorDecision::RetryImmediately,
                 _ => ErrorDecision::Propagate(e),
             }
         }
@@ -380,7 +472,7 @@ async fn dispatch_falls_through_to_catchall() {
         ) -> ErrorDecision<'a, Self::Err> {
             dispatch! {
                 e,
-                KnownError => |_e| ErrorDecision::Retry,
+                KnownError => |_e| ErrorDecision::RetryImmediately,
                 _ => ErrorDecision::Propagate(e),
             }
         }
@@ -419,6 +511,5 @@ async fn attempt_aware_policy_gives_up_after_threshold() {
     .unwrap_err();
 
     assert_eq!(result, ApiError::Timeout);
-    // attempt 1 → Retry, attempt 2 → Retry, attempt 3 → Propagate
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
 }

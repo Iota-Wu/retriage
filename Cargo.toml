@@ -1,15 +1,33 @@
 [package]
-name = "triage"
+name = "retriage"
 version = "0.1.0"
 edition = "2024"
 description = "Ergonomic recoverable error handling with retry strategies for Rust"
 keywords = ["retry", "error-handling", "resilience", "backoff", "async"]
 categories = ["asynchronous", "network-programming"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/yourusername/triage"
+repository = "https://github.com/Wordless-Wu/retriage"
 
-[lints]
-workspace = true
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+perf = { level = "deny", priority = -1 }
+style = { level = "warn", priority = -1 }
+
+clone_on_ref_ptr = "deny"
+inefficient_to_string = "deny"
+no_effect_replace = "deny"
+redundant_clone = "deny"
+unnecessary_join = "deny"
+box_collection = "deny"
+slow_vector_initialization = "deny"
+vec_box = "deny"
+filter_next = "deny"
+flat_map_identity = "deny"
+manual_flatten = "deny"
+
+missing_errors_doc = "allow"
+unwrap_used = "warn"
+cognitive_complexity = "deny"
 
 [features]
 default = ["tokio"]

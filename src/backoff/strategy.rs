@@ -12,8 +12,8 @@ use std::time::Duration;
 /// # Example
 ///
 /// ```rust,ignore
-/// use triage::backoff::strategy::Fixed;
-/// use triage::backoff::FullJitter;
+/// use retriage::backoff::Fixed;
+/// use retriage::backoff::FullJitter;
 /// use std::time::Duration;
 ///
 /// // No jitter — always 500ms
@@ -70,8 +70,7 @@ impl<J: Jitter> Iterator for Fixed<J> {
 /// # Example
 ///
 /// ```rust,ignore
-/// use triage::backoff::strategy::Linear;
-/// use triage::backoff::BoundedJitter;
+/// use retriage::backoff::{Exponential, BoundedJitter};
 /// use std::time::Duration;
 ///
 /// let backoff = Linear::new(Duration::from_millis(200), Duration::from_secs(10));
@@ -145,8 +144,7 @@ impl<J: Jitter> Iterator for Linear<J> {
 /// # Example
 ///
 /// ```rust,ignore
-/// use triage::backoff::strategy::Exponential;
-/// use triage::backoff::FullJitter;
+/// use retriage::backoff::{Exponential, FullJitter};
 /// use std::time::Duration;
 ///
 /// // Classic exponential backoff, capped at 30s
@@ -207,8 +205,7 @@ impl<J: Jitter> Iterator for Exponential<J> {
     type Item = Duration;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let exponent =
-            i32::try_from(self.attempt - 1).expect("Attempt should not bigger than i32::MAX");
+        let exponent = (self.attempt.saturating_sub(1)).min(i32::MAX as u32) as i32;
         let factor = self.multiplier.powi(exponent);
         let raw = self.base.as_secs_f64() * factor;
         let capped = if raw.is_finite() {
