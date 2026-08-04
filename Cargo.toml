@@ -2,7 +2,7 @@
 name = "retriage"
 version = "0.1.0"
 edition = "2024"
-description = "Ergonomic recoverable error handling with retry strategies for Rust"
+description = "A lightweight, zero-allocation retry macro for recoverable error handling in async Rust."
 keywords = ["retry", "error-handling", "resilience", "backoff", "async"]
 categories = ["asynchronous", "network-programming"]
 license = "MIT OR Apache-2.0"

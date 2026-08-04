@@ -2,7 +2,7 @@
 
 # retriage
 
-Ergonomic recoverable error handling with retry strategies for Rust.
+A lightweight, zero-allocation retry macro for recoverable error handling in async Rust.
 
 ## Scope
 
