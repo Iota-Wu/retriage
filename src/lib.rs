@@ -1,6 +1,6 @@
 //! # retriage
 //!
-//! Ergonomic recoverable error handling with retry strategies for Rust.
+//! A lightweight, zero-allocation retry macro for recoverable error handling in async Rust.
 //!
 //! ## Scope
 //!
@@ -79,13 +79,13 @@
 //! rebuilding it on every call:
 //!
 //! ```rust,ignore
-//! # use std::sync::LazyLock;
-//! # use retriage::{
+//! use std::sync::LazyLock;
+//! use retriage::{
 //!     ExponentialConfig, RetryConfigBuilder,
 //!     backoff::{Exponential, FullJitter},
 //!     retry,
 //! };
-//! # use std::time::Duration;
+//! use std::time::Duration;
 //!
 //! // Note: `static` requires fully explicit type parameters — `_` is not allowed.
 //! static RETRY_CONFIG: LazyLock<ExponentialConfig<MyPolicy, FullJitter>> =

@@ -2,7 +2,7 @@
 
 # retriage
 
-Ergonomic recoverable error handling with retry strategies for Rust.
+A lightweight, zero-allocation retry macro for recoverable error handling in async Rust.
 
 ## Scope
 
@@ -89,7 +89,7 @@ use retriage::{
 use std::time::Duration;
 
 // Note: `static` requires fully explicit type parameters — `_` is not allowed.
-static RETRY_CONFIG: LazyLock<ExponentialConfig<SqlitePolicy, FullJitter>> =
+static RETRY_CONFIG: LazyLock<ExponentialConfig<MyPolicy, FullJitter>> =
     LazyLock::new(|| {
         let backoff = Exponential::with_jitter(
             Duration::from_millis(100),
@@ -100,7 +100,7 @@ static RETRY_CONFIG: LazyLock<ExponentialConfig<SqlitePolicy, FullJitter>> =
         RetryConfigBuilder::new()
             .max_retries(4)
             .backoff(backoff)
-            .handler(SqlitePolicy)
+            .handler(MyPolicy)
             .build()
         });
 
@@ -122,3 +122,4 @@ retry!({ foo().await }, config, |e| e.as_ref()).await?;
 Full automatic coercion (without the cast parameter) is a planned feature.
 
 <!-- cargo-rdme end -->
+
