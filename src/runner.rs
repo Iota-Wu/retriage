@@ -64,9 +64,9 @@ where
                     sleep(duration).await;
                     ControlFlow::Continue(())
                 }
-                ErrorDecision::RetryWith(action) => {
+                ErrorDecision::RetryWith(duration, action) => {
                     action().await;
-                    sleep(backoff).await;
+                    sleep(duration).await;
                     ControlFlow::Continue(())
                 }
                 ErrorDecision::RetryWithImmediately(action) => {
@@ -180,14 +180,17 @@ mod tests {
                 &self,
                 _e: &'a Self::Err,
                 _attempt: u32,
-                _backoff: Duration,
+                backoff: Duration,
             ) -> ErrorDecision<'a, Self::Err> {
                 let ran = Arc::clone(&self.ran);
-                ErrorDecision::RetryWith(Box::new(move || {
-                    Box::pin(async move {
-                        ran.fetch_add(1, Ordering::SeqCst);
-                    })
-                }))
+                ErrorDecision::RetryWith(
+                    backoff,
+                    Box::new(move || {
+                        Box::pin(async move {
+                            ran.fetch_add(1, Ordering::SeqCst);
+                        })
+                    }),
+                )
             }
         }
 

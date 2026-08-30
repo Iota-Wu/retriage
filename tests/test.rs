@@ -249,14 +249,17 @@ async fn retry_with_executes_action_then_retries() {
             &self,
             _e: &'a Self::Err,
             _attempt: u32,
-            _backoff: Duration,
+            backoff: Duration,
         ) -> ErrorDecision<'a, Self::Err> {
             let rotated = Arc::clone(&self.rotated);
-            ErrorDecision::RetryWith(Box::new(move || {
-                Box::pin(async move {
-                    rotated.fetch_add(1, Ordering::SeqCst);
-                })
-            }))
+            ErrorDecision::RetryWith(
+                backoff,
+                Box::new(move || {
+                    Box::pin(async move {
+                        rotated.fetch_add(1, Ordering::SeqCst);
+                    })
+                }),
+            )
         }
     }
 
