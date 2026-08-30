@@ -21,12 +21,12 @@ pub enum ErrorDecision<'a, E: ?Sized + 'static> {
     RetryAfter(Duration),
 
     /// Execute an async action (e.g. rotate IP, refresh token),
-    /// then retry. Backoff still applies after the action completes.
-    RetryWith(RetryAction),
-
-    /// Execute an async action (e.g. rotate IP, refresh token),
     /// then retry. Backoff does not apply after the action completes.
     RetryWithImmediately(RetryAction),
+
+    /// Execute an async action (e.g. rotate IP, refresh token),
+    /// then retry. Backoff still applies after the action completes.
+    RetryWith(Duration, RetryAction),
 
     /// Do not retry — propagate the error to the caller as-is.
     Propagate(&'a E),
@@ -38,7 +38,10 @@ impl<E: Debug> Debug for ErrorDecision<'_, E> {
             Self::RetryImmediately => f.write_str("RetryImmediately"),
             Self::RetryAfter(duration) => f.debug_tuple("RetryAfter").field(duration).finish(),
             // RetryWith is an async closure, so we can't implement Debug for it directly.
-            Self::RetryWith(_) => f.write_str("RetryWith(<async closure>)"),
+            Self::RetryWith(backoff, _) => f
+                .debug_tuple("RetryWith(<async closure>)")
+                .field(backoff)
+                .finish(),
             // RetryWithImmediately is an async closure, so we can't implement Debug for it directly.
             Self::RetryWithImmediately(_) => f.write_str("RetryWithImmediately(<async closure>)"),
             Self::Propagate(err) => f.debug_tuple("Propagate").field(err).finish(),
@@ -199,9 +202,11 @@ mod tests {
 
     #[test]
     fn test_retry_with_carries_action() {
-        let decision: ErrorDecision<TestError> =
-            ErrorDecision::RetryWith(Box::new(|| Box::pin(async { /* rotate IP */ })));
-        assert_matches!(decision, ErrorDecision::RetryWith(_));
+        let decision: ErrorDecision<TestError> = ErrorDecision::RetryWith(
+            Duration::ZERO,
+            Box::new(|| Box::pin(async { /* rotate IP */ })),
+        );
+        assert_matches!(decision, ErrorDecision::RetryWith(_, _));
     }
 
     #[test]
@@ -221,8 +226,11 @@ mod tests {
         assert_eq!(format!("{decision_after:?}"), "RetryAfter(50ms)");
 
         let decision_with: ErrorDecision<TestError> =
-            ErrorDecision::RetryWith(Box::new(|| Box::pin(async {})));
-        assert_eq!(format!("{decision_with:?}"), "RetryWith(<async closure>)");
+            ErrorDecision::RetryWith(Duration::from_millis(50), Box::new(|| Box::pin(async {})));
+        assert_eq!(
+            format!("{decision_with:?}"),
+            "RetryWith(<async closure>)(50ms)"
+        );
 
         let decision_with_imm: ErrorDecision<TestError> =
             ErrorDecision::RetryWithImmediately(Box::new(|| Box::pin(async {})));
