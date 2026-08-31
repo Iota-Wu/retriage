@@ -256,4 +256,25 @@ mod tests {
         // Initial attempt (1) + max 1 retry = 2 attempts total
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
+
+    #[test]
+    fn print_future_size() {
+        async fn simple() -> Result<u32, CustomError> {
+            Ok(42)
+        }
+        println!("no future: {}", std::mem::size_of_val(&simple()));
+
+        let config = RetryConfigBuilder::new()
+            .max_retries(1)
+            .backoff(Fixed::new(Duration::ZERO))
+            .handler(TestPolicy)
+            .build();
+
+        let future = retry!({ Ok::<u32, CustomError>(42) }, config); // The size of the future last time checked was 232
+        println!("retry future: {}", std::mem::size_of_val(&future));
+
+        let mut state = config.create_state();
+        let step_future = crate::runner::next_step(&mut state, &config, &CustomError);
+        println!("next_step future: {}", std::mem::size_of_val(&step_future));
+    }
 }
