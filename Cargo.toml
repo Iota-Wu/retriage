@@ -25,6 +25,7 @@ vec_box = "deny"
 filter_next = "deny"
 flat_map_identity = "deny"
 manual_flatten = "deny"
+large_futures = "deny"
 
 missing_errors_doc = "allow"
 unwrap_used = "warn"
@@ -39,5 +40,10 @@ rand = "0.10.2"
 tokio = { version = "1.49.0", features = ["time"], optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.49.0", features = ["macros", "rt"] }
+tokio = { version = "1.49.0", features = ["macros", "rt", "test-util"] }
 anyhow = { version = "1.0.101" }
+criterion = { version = "0.8.2", features = ["async_tokio"] }
+
+[[bench]]
+name = "retry_bench"
+harness = false
