@@ -68,23 +68,7 @@ pub fn cast_err<'a, E, Target: ?Sized>(e: &'a E, f: impl Fn(&'a E) -> &'a Target
 macro_rules! retry {
     // Without cast — &e passed directly, zero cost
     ($blk:block, $config:expr) => {
-        async {
-            let config = &$config;
-            let mut state = config.create_state();
-            loop {
-                match $blk {
-                    Ok(value) => break Ok(value),
-                    Err(e) => {
-                        if $crate::runner::next_step(&mut state, config, &e)
-                            .await
-                            .is_break()
-                        {
-                            break Err(e);
-                        }
-                    }
-                }
-            }
-        }
+        $crate::retry!($blk, $config, |e| e)
     };
 
     // With cast — user provides a closure to convert &E to &H::Err
