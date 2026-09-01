@@ -7,6 +7,8 @@ on:
   pull_request:
     branches: [main]
 
+  workflow_dispatch:
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -53,9 +55,16 @@ jobs:
           cargo rdme install-rust-toolchain-for-intralinks
 
       - run: cargo rdme --check
+      
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: EmbarkStudios/cargo-deny-action@v2  
 
   test:
-    needs: [fmt, clippy, rdme]
+    needs: [fmt, clippy, rdme, deny]
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
