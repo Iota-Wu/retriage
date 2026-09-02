@@ -1,0 +1,2 @@
+[alias]
+print_future_size = "test print_future_size_with_different_policy -- --nocapture"
