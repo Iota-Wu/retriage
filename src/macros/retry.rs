@@ -68,23 +68,7 @@ pub fn cast_err<'a, E, Target: ?Sized>(e: &'a E, f: impl Fn(&'a E) -> &'a Target
 macro_rules! retry {
     // Without cast — &e passed directly, zero cost
     ($blk:block, $config:expr) => {
-        async {
-            let config = &$config;
-            let mut state = config.create_state();
-            loop {
-                match $blk {
-                    Ok(value) => break Ok(value),
-                    Err(e) => {
-                        if $crate::runner::next_step(&mut state, config, &e)
-                            .await
-                            .is_break()
-                        {
-                            break Err(e);
-                        }
-                    }
-                }
-            }
-        }
+        $crate::retry!($blk, $config, |e| e)
     };
 
     // With cast — user provides a closure to convert &E to &H::Err
@@ -93,17 +77,24 @@ macro_rules! retry {
         async {
             let config = &$config;
             let mut state = config.create_state();
+
             loop {
                 match $blk {
                     Ok(value) => break Ok(value),
                     Err(e) => {
                         let err_ref = $crate::macros::retry::cast_err(&e, $cast);
 
-                        if $crate::runner::next_step(&mut state, config, err_ref)
-                            .await
-                            .is_break()
-                        {
+                        let std::ops::ControlFlow::Continue((action, duration)) =
+                            $crate::runner::next_step(&mut state, config, err_ref)
+                        else {
                             break Err(e);
+                        };
+
+                        if let Some(action) = action {
+                            action().await;
+                        }
+                        if let Some(duration) = duration {
+                            tokio::time::sleep(duration).await;
                         }
                     }
                 }
@@ -117,7 +108,7 @@ macro_rules! retry {
 #[cfg(test)]
 mod tests {
     use crate::{
-        backoff::Fixed,
+        backoff::{Exponential, Fixed},
         config::RetryConfigBuilder,
         handler::{ErrorDecision, ErrorHandler},
         types::DynError,
@@ -257,6 +248,46 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 
+    #[tokio::test]
+    async fn retry_with_executes_action() {
+        use std::sync::Arc;
+
+        struct ActionPolicy {
+            ran: Arc<AtomicU32>,
+        }
+        impl ErrorHandler for ActionPolicy {
+            type Err = CustomError;
+            fn handle<'a>(
+                &self,
+                _e: &'a Self::Err,
+                _attempt: u32,
+                backoff: Duration,
+            ) -> ErrorDecision<'a, Self::Err> {
+                let ran = Arc::clone(&self.ran);
+                ErrorDecision::RetryWith(
+                    backoff,
+                    Box::new(move || {
+                        Box::pin(async move {
+                            ran.fetch_add(1, Ordering::SeqCst);
+                        })
+                    }),
+                )
+            }
+        }
+
+        let ran = Arc::new(AtomicU32::new(0));
+        let config = RetryConfigBuilder::new()
+            .max_retries(1)
+            .backoff(Fixed::new(Duration::ZERO))
+            .handler(ActionPolicy {
+                ran: Arc::clone(&ran),
+            })
+            .build();
+
+        let _ = retry!({ Err::<i32, CustomError>(CustomError) }, config).await;
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn print_future_size() {
         async fn simple() -> Result<u32, CustomError> {
@@ -276,5 +307,32 @@ mod tests {
         let mut state = config.create_state();
         let step_future = crate::runner::next_step(&mut state, &config, &CustomError);
         println!("next_step future: {}", std::mem::size_of_val(&step_future));
+    }
+
+    #[test]
+    fn print_future_size_with_different_policy() {
+        let fixed_config = RetryConfigBuilder::new()
+            .max_retries(1)
+            .backoff(Fixed::new(Duration::ZERO))
+            .handler(TestPolicy)
+            .build();
+
+        let future = retry!({ Ok::<u32, CustomError>(42) }, fixed_config);
+        println!(
+            "retry future with fixed policy: {}",
+            std::mem::size_of_val(&future)
+        );
+
+        let exp_config = RetryConfigBuilder::new()
+            .max_retries(1)
+            .backoff(Exponential::new(Duration::ZERO, Duration::MAX))
+            .handler(TestPolicy)
+            .build();
+
+        let future = retry!({ Ok::<u32, CustomError>(42) }, exp_config);
+        println!(
+            "retry future with exponential policy: {}",
+            std::mem::size_of_val(&future)
+        );
     }
 }
